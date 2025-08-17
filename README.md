@@ -1,103 +1,73 @@
-# Building Apps with the o1 Pro Template System
+*   **`README.md`**:
 
-This is the repo for a free workshop on how to use [OpenAI's o1-pro](https://chatgpt.com/) to build full-stack web apps with a [starter template](https://github.com/mckaywrigley/mckays-app-template).
+    *   **Propósito**: Este `README.md` sirve como la guía principal para comprender, instalar y ejecutar el proyecto de implementación de DeltaOne. Está diseñado para ingenieros de software, desarrolladores y cualquier persona que necesite interactuar con la base de código.
 
-It is part 1 of a 2 part series. This is the beginner workshop. The advanced workshop will be released on February 24th.
+        *   **Título del Proyecto**: **Implementación Inicial y Configuración de Scorecards y KPIs en DeltaOne para Gestión Estratégica**.
 
-## Workshop Video
+        *   **Descripción**: Este proyecto se centra en establecer una **plataforma integral y estandarizada para la configuración y gestión centralizada de Scorecards y KPIs** (Indicadores Clave de Rendimiento). Busca abordar la actual dispersión de información, las actualizaciones manuales propensas a errores y la visibilidad limitada del rendimiento en tiempo real, lo que ha llevado a una **toma de decisiones reactiva** y a la falta de alineación estratégica.
 
-You can find the video for this workshop on [X](https://x.com/mckaywrigley/status/1891544731496206365) and [YouTube](https://www.youtube.com/watch?v=Y4n_p9w8pGY).
+            Las **funcionalidades clave** incluidas en esta fase inicial son:
 
-This workshop is also available in course form on [Takeoff](https://www.jointakeoff.com/) - we will continue to add to it and keep it updated with the latest model releases over time.
+            *   **Configuración y gestión de Scorecards y KPIs**:
+                *   Implementación de la **estructura del Scorecard** para organizar métricas de rendimiento y estrategia.
+                *   Definición y configuración de **KPIs**, incluyendo tipos de puntuación como **Goal/Red Flag, Sí/No y Texto**.
+                *   Configuración de **actualizaciones manuales de valores de KPI** y asignación de "Updaters".
+                *   Capacidad para **calcular valores de KPI automáticamente** usando ecuaciones basadas en otros KPIs.
+                *   **Asignación de propietarios** a los KPIs y gestión de la **ponderación** de los elementos del Scorecard.
+                *   Habilitación de la **auditoría de cálculos de KPI y puntuaciones** para asegurar la confianza en los datos.
+            *   **Implementación de importaciones de datos solo para KPIs**:
+                *   Configuración de **importaciones de valores de KPI desde hojas de cálculo (Excel)** mediante "Simple Value Imports".
+                *   Configuración de **importaciones avanzadas** desde hojas de cálculo y **bases de datos relacionales** como Microsoft SQL Server, Oracle, MySQL, PostgreSQL, Hive, usando "Standard Value Imports".
+                *   Configuración de **conexiones de importación** y capacidad de **transformar datos** durante el proceso de importación (ej. limpieza, filtrado).
+                *   **Programación de importaciones recurrentes** para automatización.
+            *   **Configuración de Alertas para eventos específicos de KPI y notas**:
+                *   Implementación de **alertas automáticas para KPIs que se vuelven "Rojos"** y **recordatorios de actualización de KPI**.
+                *   Habilitación de **alertas cuando se responda a una nota** y capacidad de **requerir una nota** al actualizar KPIs a bajo rendimiento.
+                *   Creación de **alertas personalizadas** para cambios en la puntuación o el valor del KPI.
+            *   **Administración de usuarios, grupos y permisos con capacidad de personalizar la terminología y metodología**:
+                *   Configuración de **usuarios individuales** e **importación masiva de usuarios**.
+                *   Creación y gestión de **grupos de usuarios** (Power Users, Update Users, Interactive Users, View Only) para definir permisos.
+                *   Asignación de **permisos basados en la organización** y **personalización de la terminología** de la aplicación (ej. cambiar "Measures" a "KPIs").
+                *   Activación/Desactivación de "Strategy Maps".
+            *   **Organizaciones**:
+                *   Configuración de la **jerarquía de organizaciones** dentro de la herramienta.
+                *   Implementación de **KPIs de rollup** que agregan automáticamente valores de KPIs de organizaciones hijas a las padre.
+                *   Configuración de **organizaciones basadas en plantillas a partir de campos de datasets** e integración de **permisos organizacionales a través de grupos de árboles de rollup**.
 
-Use code `O1PRO` for 25% off at checkout.
+        *   **Instalación**:
+            *   Asegúrate de tener **Node.js** instalado en tu sistema.
+            *   **Clona este repositorio**.
+            *   Instala las dependencias del proyecto ejecutando `npm install` o `yarn install` en la raíz del proyecto.
+            *   Configura las **variables de entorno** en un archivo `.env.local` en la raíz del proyecto. **Todas las variables de entorno deben ir en este archivo**. Las variables destinadas al frontend deben prefijarse con `NEXT_PUBLIC_`.
+            *   Asegúrate de que tu instancia de **PostgreSQL** esté operativa y configurada según los detalles de conexión en tus variables de entorno. El backend interactúa con la base de datos utilizando **Drizzle ORM**.
+            *   Configura el servicio de autenticación **Clerk** y el backend de **Supabase** según la documentación oficial de estos servicios.
 
-I get asked all the time for an example of content on Takeoff, so hopefully this workshop gives you a feel for our content and my teaching style.
+        *   **Scripts Disponibles**:
+            *   `npm run dev` o `yarn dev`: Inicia la aplicación en modo desarrollo.
+            *   `npm run build` o `yarn build`: Compila la aplicación para producción.
+            *   `npm start` o `yarn start`: Inicia la aplicación compilada en modo producción.
 
-## About Me
+        *   **Estructura de Directorios**:
+            *   `actions/`: Contiene las **acciones del servidor** (Server Actions).
+                *   `actions/db/`: Acciones relacionadas con la base de datos.
+            *   `app/`: Maneja el **enrutador de Next.js** para las rutas de la aplicación, páginas y componentes.
+                *   `_components/`: Componentes específicos de una ruta.
+                *   `layout.tsx`: Layouts para las rutas.
+                *   `page.tsx`: Páginas para las rutas.
+            *   `components/`: **Componentes compartidos** reutilizables en toda la aplicación.
+            *   `db/`: Contiene la lógica relacionada con la base de datos.
+                *   `schema/`: **Esquemas de la base de datos**.
+            *   `hooks/`: **Hooks personalizados** de React.
+            *   `lib/`: Código de librería general.
+            *   `prompts/`: Archivos de prompts (si aplica).
+            *   `public/`: Archivos estáticos.
+            *   `types/`: **Definiciones de tipos**.
+            *   `ui/`: **Componentes de interfaz de usuario** reutilizables (Shadcn/UI).
 
-My name is [Mckay](https://www.mckaywrigley.com/).
+        *   **Pila Tecnológica**:
+            *   **Frontend**: **Next.js, Tailwind CSS, Shadcn/UI, Framer Motion**.
+            *   **Backend**: **PostgreSQL, Supabase, Drizzle ORM, Server Actions**.
+            *   **Autenticación**: **Clerk**.
+            *   **Despliegue**: **Vercel**.
 
-I'm currently building [Takeoff](https://www.jointakeoff.com/) - the best place on the internet to learn how to build with AI.
-
-Follow me on [X](https://x.com/mckaywrigley) and subscribe to my [YouTube](https://www.youtube.com/channel/UCXZFVVCFahewxr3est7aT7Q) for more free AI coding tutorials & guides.
-
-## Tech Stack
-
-- AI Model: [o1-pro](https://chatgpt.com/)
-- IDE: [Cursor](https://www.cursor.com/)
-- AI Tools: [RepoPrompt](https://repoprompt.com/), [V0](https://v0.dev/), [Perplexity](https://www.perplexity.com/)
-- Frontend: [Next.js](https://nextjs.org/docs), [Tailwind](https://tailwindcss.com/docs/guides/nextjs), [Shadcn](https://ui.shadcn.com/docs/installation), [Framer Motion](https://www.framer.com/motion/introduction/)
-- Backend: [PostgreSQL](https://www.postgresql.org/about/), [Supabase](https://supabase.com/), [Drizzle](https://orm.drizzle.team/docs/get-started-postgresql), [Server Actions](https://nextjs.org/docs/app/building-your-application/data-fetching/server-actions-and-mutations)
-- Auth: [Clerk](https://clerk.com/)
-- Payments: [Stripe](https://stripe.com/)
-
-**Note**: While I _highly_ recommend using o1-pro for this workflow, you can also use o3-mini, Claude 3.5 Sonnet, Gemini 2.0 Pro, and DeepSeek r1 for cheaper alternatives. However, you _will_ run into issues with those other models in this particular workflow, so I recommend using o1-pro for this workflow if possible.
-
-## Prerequisites
-
-You will need accounts for the following services.
-
-They all have free plans that you can use to get started, with the exception of ChatGPT Pro (if you are using o1-pro).
-
-- Create a [Cursor](https://www.cursor.com/) account
-- Create a [GitHub](https://github.com/) account
-- Create a [Supabase](https://supabase.com/) account
-- Create a [Clerk](https://clerk.com/) account
-- Create a [Stripe](https://stripe.com/) account
-- Create a [Vercel](https://vercel.com/) account
-
-You will likely not need paid plans unless you are building a business.
-
-## Guide
-
-### Clone the repo
-
-1. Clone this repo:
-
-```bash
-git clone https://github.com/mckaywrigley/o1-pro-template-system o1-pro-project
-```
-
-2. Save the original remote as "upstream" before removing it:
-
-```bash
-git remote rename origin upstream
-```
-
-3. Create a new repository on GitHub
-
-4. Add the new repository as "origin":
-
-```bash
-git remote add origin https://github.com/your-username/your-repo-name.git
-```
-
-5. Push the new repository:
-
-```
-git branch -M main
-git push -u origin main
-```
-
-### Run the app
-
-1. Install dependencies:
-
-```bash
-npm install
-```
-
-2. Run the app:
-
-```bash
-npm run dev
-```
-
-3.  View the app on http://localhost:3000
-
-### Follow the workshop
-
-View the full workshop on [X](https://x.com/mckaywrigley/status/1891544731496206365) and [YouTube](https://www.youtube.com/watch?v=Y4n_p9w8pGY).
-
-Or sign up for [Takeoff](https://www.jointakeoff.com/) to get access to the full workshop in course form.
+        *   **Despliegue**: La aplicación se despliega en **Vercel**.
