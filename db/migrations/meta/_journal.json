@@ -15,6 +15,13 @@
       "when": 1755630881765,
       "tag": "0001_motionless_wallflower",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1755636310717,
+      "tag": "0002_futuristic_shooting_star",
+      "breakpoints": true
     }
   ]
 }
