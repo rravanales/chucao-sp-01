@@ -22,6 +22,13 @@
       "when": 1755636310717,
       "tag": "0002_futuristic_shooting_star",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1755703092355,
+      "tag": "0003_rich_praxagora",
+      "breakpoints": true
     }
   ]
 }
