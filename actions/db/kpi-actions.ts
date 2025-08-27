@@ -1,9 +1,11 @@
 /**
- * @file actions/db/kpi-actions.ts
+ * @file actions/db/kpi-actions3.ts
  * @brief Implementa Server Actions para la gestión de Indicadores Clave de Rendimiento (KPIs) en DeltaOne.
  * @description Este archivo contiene funciones del lado del servidor para crear, leer,
  * actualizar la configuración de KPIs, asignar propietarios a los elementos de Scorecard
  * a los que están vinculados, y gestionar las actualizaciones manuales de los valores de los KPIs.
+ * También incluye la lógica para habilitar/deshabilitar la funcionalidad de rollup para KPIs,
+ * ajustando los campos de actualización relacionados.
  * Asegura la validación de datos, la consistencia lógica y la protección de accesos no autorizados.
  */
 "use server";
@@ -12,6 +14,7 @@ import { db } from "@/db/db";
 import {
   InsertKpi,
   InsertKpiUpdater,
+  InsertKpiValue,    
   kpisTable,
   kpiScoringTypeEnum,
   kpiCalendarFrequencyEnum,
@@ -25,7 +28,7 @@ import {
   SelectScorecardElement,
   kpiColorEnum,
   SelectAppSetting, // Para futuras referencias si se necesita leer configuraciones de la app aquí
-  appSettingsTable // Para futuras referencias
+  appSettingsTable, // Para futuras referencias
 } from "@/db/schema";
 import { ActionState, ok, fail } from "@/types";
 import { auth } from "@clerk/nextjs/server";
@@ -189,18 +192,14 @@ const updateKpiConfigurationSchema = z
  * @description Esquema de validación para obtener un KPI por su ID.
  * @property {string} id - ID del KPI, UUID requerido.
  */
-const getKpiByIdSchema = z.object({
-  id: z.string().uuid("ID de KPI inválido."),
-});
+const getKpiByIdSchema = z.object({ id: z.string().uuid("ID de KPI inválido."), });
 
 /**
  * @schema deleteKpiSchema
  * @description Esquema de validación para la eliminación de un KPI.
  * @property {string} id - ID del KPI, UUID requerido.
  */
-const deleteKpiSchema = z.object({
-  id: z.string().uuid("ID de KPI inválido."),
-});
+const deleteKpiSchema = z.object({ id: z.string().uuid("ID de KPI inválido."), });
 
 /**
  * @schema assignScorecardElementOwnersSchema
@@ -254,7 +253,6 @@ const updateKpiManualValueSchema = z.object({
  * @description Esquema de validación para configurar la ecuación de cálculo de un KPI (UC-103).
  * @property {string} kpiId - ID del KPI al que se le asignará la ecuación, UUID requerido.
  * @property {string | null} calculationEquation - La ecuación de cálculo, opcional y nullable.
- *                                                Si es una cadena vacía, se interpreta como null.
  */
 const setKpiCalculationEquationSchema = z.object({
   kpiId: z.string().uuid("ID de KPI inválido."),
@@ -265,8 +263,19 @@ const setKpiCalculationEquationSchema = z.object({
     .nullable(),
 });
 
+/**
+ * @schema enableKpiRollupSchema
+ * @description Esquema de validación para habilitar/deshabilitar la funcionalidad de rollup en un KPI (UC-501).
+ * @property {string} kpiId - ID del KPI a actualizar, UUID requerido.
+ * @property {boolean} rollupEnabled - Estado deseado para la funcionalidad de rollup (true para habilitar, false para deshabilitar).
+ */
+const enableKpiRollupSchema = z.object({
+  kpiId: z.string().uuid("ID de KPI inválido."),
+  rollupEnabled: z.boolean(),
+});
+
 /* -------------------------------------------------------------------------- */
-/*                               Server Actions                               */
+/*                                Server Actions                              */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -309,32 +318,48 @@ export async function createKpiAction(
     );
 
     if (!existingScorecardElement) {
-      logger.warn(`Scorecard element with ID ${validatedData.data.scorecardElementId} not found.`);
-      return fail("El elemento de Scorecard especificado no existe.");
+      logger.warn(`Scorecard Element with ID ${validatedData.data.scorecardElementId} not found.`);
+      return fail("Elemento de Scorecard no encontrado.");
     }
 
     if (existingScorecardElement.elementType !== "KPI") {
       logger.warn(
-        `Scorecard element with ID ${validatedData.data.scorecardElementId} is not of type 'KPI'. Actual type: ${existingScorecardElement.elementType}.`,
+        `Scorecard Element with ID ${validatedData.data.scorecardElementId} is not of type 'KPI'. Actual type: ${existingScorecardElement.elementType}`,
       );
-      return fail("El elemento de Scorecard debe ser de tipo 'KPI' para asociarle un KPI.");
+      return fail("Un KPI solo puede vincularse a un elemento de Scorecard de tipo 'KPI'.");
     }
 
-    // Verificar si ya existe un KPI asociado a este elemento de Scorecard
-    const existingKpiForElement = await firstOrUndefined(
-      db.select().from(kpisTable).where(eq(kpisTable.scorecardElementId, validatedData.data.scorecardElementId)),
+    // Verificar si ya existe un KPI vinculado a este scorecardElementId
+    const existingKpi = await firstOrUndefined(
+      db
+        .select()
+        .from(kpisTable)
+        .where(eq(kpisTable.scorecardElementId, validatedData.data.scorecardElementId)),
     );
 
-    if (existingKpiForElement) {
-      logger.warn(`A KPI already exists for scorecard element ID ${validatedData.data.scorecardElementId}.`);
+    if (existingKpi) {
+      logger.warn(
+        `A KPI already exists for Scorecard Element ID ${validatedData.data.scorecardElementId}.`,
+      );
       return fail("Ya existe un KPI asociado a este elemento de Scorecard.");
     }
 
-    const [newKpi] = await db.insert(kpisTable).values(validatedData.data).returning();
+    const newKpi: InsertKpi = {
+      ...validatedData.data,
+      // Default values for createdAt and updatedAt are handled by the DB schema
+    };    
 
-    return ok("KPI creado exitosamente.", newKpi);
+    const [createdKpi] = await db.insert(kpisTable).values(newKpi).returning();
+
+    if (!createdKpi) {
+      logger.error("Failed to insert KPI into the database.");
+      return fail("Fallo al crear el KPI.");
+    }
+
+    logger.info("KPI created successfully.", { kpiId: createdKpi.id, scorecardElementId: createdKpi.scorecardElementId });
+    return ok("KPI creado exitosamente.", createdKpi);
   } catch (error) {
-    logger.error(`Error creating KPI: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error(`Error creating KPI: ${error instanceof Error ? error.message : String(error)}`, { data });
     return fail("Fallo al crear el KPI.");
   }
 }
@@ -343,7 +368,7 @@ export async function createKpiAction(
  * @function getKpiAction
  * @description Obtiene un KPI específico por su ID.
  * @param {string} id - El ID del KPI a recuperar.
- * @returns {Promise<ActionState<SelectKpi>>} Un objeto ActionState indicando el éxito o fracaso y los datos del KPI.
+ * @returns {Promise<ActionState<SelectKpi>>} Un objeto ActionState con el KPI encontrado o un mensaje de error.
  */
 export async function getKpiAction(id: string): Promise<ActionState<SelectKpi>> {
   const { userId } = await auth();
@@ -361,12 +386,14 @@ export async function getKpiAction(id: string): Promise<ActionState<SelectKpi>> 
 
   try {
     const kpi = await firstOrUndefined(db.select().from(kpisTable).where(eq(kpisTable.id, validatedId.data.id)));
+
     if (!kpi) {
       return fail("KPI no encontrado.");
     }
+
     return ok("KPI obtenido exitosamente.", kpi);
   } catch (error) {
-    logger.error(`Error retrieving KPI: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error(`Error retrieving KPI: ${error instanceof Error ? error.message : String(error)}`, { id });
     return fail("Fallo al obtener el KPI.");
   }
 }
@@ -413,14 +440,17 @@ export async function updateKpiConfigurationAction(
       .returning();
 
     if (!updatedKpi) {
-      return fail("KPI no encontrado o no se pudo actualizar la configuración.");
+      logger.error(`Failed to update KPI configuration for ID: ${kpiId}`);
+      return fail("Fallo al actualizar la configuración del KPI.");
     }
 
-    return ok("Configuración del KPI actualizada exitosamente.", updatedKpi);
+    logger.info("KPI configuration updated successfully.", { kpiId: updatedKpi.id });
+    return ok("Configuración de KPI actualizada exitosamente.", updatedKpi);
   } catch (error) {
-    logger.error(
-      `Error updating KPI configuration: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    logger.error(`Error updating KPI configuration: ${error instanceof Error ? error.message : String(error)}`, {
+      kpiId,
+      data,
+    });
     return fail("Fallo al actualizar la configuración del KPI.");
   }
 }
@@ -428,7 +458,7 @@ export async function updateKpiConfigurationAction(
 /**
  * @function deleteKpiAction
  * @description Elimina un KPI de la base de datos.
- * La eliminación en cascada de los valores de KPI asociados (`kpi_values`) y los updaters (`kpi_updaters`)
+ * La eliminación en cascada de los valores de KPI asociados (kpi_values) y los updaters (kpi_updaters)
  * es manejada por las restricciones de clave foránea en la base de datos.
  * @param {string} id - El ID del KPI a eliminar.
  * @returns {Promise<ActionState<undefined>>} Un objeto ActionState indicando el éxito o fracaso.
@@ -448,10 +478,17 @@ export async function deleteKpiAction(id: string): Promise<ActionState<undefined
   }
 
   try {
-    await db.delete(kpisTable).where(eq(kpisTable.id, validatedId.data.id));
+    const [deletedKpi] = await db.delete(kpisTable).where(eq(kpisTable.id, validatedId.data.id)).returning();
+
+    if (!deletedKpi) {
+      logger.warn(`KPI with ID ${validatedId.data.id} not found for deletion.`);
+      return fail("KPI no encontrado para eliminar.");
+    }
+
+    logger.info("KPI deleted successfully.", { kpiId: deletedKpi.id });
     return ok("KPI eliminado exitosamente.");
   } catch (error) {
-    logger.error(`Error deleting KPI: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error(`Error deleting KPI: ${error instanceof Error ? error.message : String(error)}`, { id });
     return fail("Fallo al eliminar el KPI.");
   }
 }
@@ -474,7 +511,13 @@ export async function assignScorecardElementOwnersAction(
     return fail("No autorizado. Debe iniciar sesión.");
   }
 
-  const validatedData = assignScorecardElementOwnersSchema.safeParse({ scorecardElementId, ownerUserId });
+  // Sanitizar ownerUserId a null si es una cadena vacía
+  const sanitizedOwnerUserId = ownerUserId === "" ? null : ownerUserId;
+
+  const validatedData = assignScorecardElementOwnersSchema.safeParse({
+    scorecardElementId,
+    ownerUserId: sanitizedOwnerUserId,
+  });
   if (!validatedData.success) {
     const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
     logger.error(`Validation error for assignScorecardElementOwnersAction: ${errorMessage}`);
@@ -489,14 +532,20 @@ export async function assignScorecardElementOwnersAction(
       .returning();
 
     if (!updatedElement) {
-      return fail("Elemento de Scorecard no encontrado o no se pudo actualizar el propietario.");
+      logger.warn(`Scorecard Element with ID ${validatedData.data.scorecardElementId} not found.`);
+      return fail("Elemento de Scorecard no encontrado.");
     }
 
+    logger.info("Owner assigned to scorecard element successfully.", {
+      scorecardElementId: updatedElement.id,
+      ownerUserId: updatedElement.ownerUserId,
+    });
     return ok("Propietario del elemento de Scorecard asignado exitosamente.", updatedElement);
   } catch (error) {
-    logger.error(
-      `Error assigning owner to scorecard element: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    logger.error(`Error assigning owner to scorecard element: ${error instanceof Error ? error.message : String(error)}`, {
+      scorecardElementId,
+      ownerUserId,
+    });
     return fail("Fallo al asignar el propietario del elemento de Scorecard.");
   }
 }
@@ -534,27 +583,40 @@ export async function assignKpiUpdatersAction(
       return fail("KPI no encontrado.");
     }
 
-    // Try to insert, if it's a duplicate (user already an updater), then update.
-    // Drizzle's upsert functionality for composite primary keys is through `onConflictDoUpdate`.
-    const [updater] = await db
+    const newUpdater: InsertKpiUpdater = {
+      kpiId: validatedData.data.kpiId,
+      userId: validatedData.data.userId,
+      canModifyThresholds: validatedData.data.canModifyThresholds || false,
+      // Default values for createdAt and updatedAt are handled by the DB schema
+    };
+
+    // Use upsert pattern to insert or update
+    const [result] = await db
       .insert(kpiUpdatersTable)
-      .values({
-        kpiId: validatedData.data.kpiId,
-        userId: validatedData.data.userId,
-        canModifyThresholds: validatedData.data.canModifyThresholds || false, // Default to false
-      })
+      .values(newUpdater)
       .onConflictDoUpdate({
         target: [kpiUpdatersTable.kpiId, kpiUpdatersTable.userId],
         set: {
-          canModifyThresholds: validatedData.data.canModifyThresholds || false,
+          canModifyThresholds: newUpdater.canModifyThresholds,
           updatedAt: new Date(),
         },
       })
       .returning();
 
-    return ok("Encargado de actualización de KPI asignado/actualizado exitosamente.", updater);
+    if (!result) {
+      logger.error("Failed to assign KPI updater.");
+      return fail("Fallo al asignar el encargado de actualización de KPI.");
+    }
+
+    logger.info("KPI updater assigned/updated successfully.", {
+      kpiId: result.kpiId,
+      userId: result.userId,
+    });
+    return ok("Encargado de actualización de KPI asignado/actualizado exitosamente.", result);
   } catch (error) {
-    logger.error(`Error assigning KPI updater: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error(`Error assigning KPI updater: ${error instanceof Error ? error.message : String(error)}`, {
+      data,
+    });
     return fail("Fallo al asignar el encargado de actualización de KPI.");
   }
 }
@@ -568,9 +630,8 @@ export async function assignKpiUpdatersAction(
  * @param {z.infer<typeof updateKpiManualValueSchema>} data - Datos de la actualización manual del KPI.
  * @returns {Promise<ActionState<SelectKpiValue>>} Objeto ActionState indicando el éxito o fracaso.
  * @notes
- *   - El valor actual del KPI y los umbrales se almacenan como texto para compatibilidad con el esquema,
- *     pero se intenta convertir a número para el cálculo del score/color.
- *   - Se verifica la configuración `require_note_for_red_kpi` en `appSettingsTable` antes de permitir la actualización.
+ *  El valor actual del KPI y los umbrales se almacenan como texto para compatibilidad con el esquema,
+ *  Se verifica la configuración require_note_for_red_kpi en appSettingsTable antes de permitir la actualización.
  */
 export async function updateKpiManualValueAction(
   data: z.infer<typeof updateKpiManualValueSchema>,
@@ -591,6 +652,10 @@ export async function updateKpiManualValueAction(
   const { kpiId, periodDate, actualValue, targetValue, thresholdRed, thresholdYellow, note } = validatedData.data;
 
   try {
+    // Helper: valida string no vacío (evita undefined/null y espacios)
+    const isNonEmptyString = (v: unknown): v is string =>
+      typeof v === "string" && v.trim() !== "";
+  
     // 1. Verify if the current user is an authorized updater for this KPI
     const isUpdater = await firstOrUndefined(
       db
@@ -599,118 +664,137 @@ export async function updateKpiManualValueAction(
         .where(and(eq(kpiUpdatersTable.kpiId, kpiId), eq(kpiUpdatersTable.userId, currentAuthUserId))),
     );
 
+    // TODO: Implement proper permission check for updaters based on organization or roles.
+    // For now, a user is an updater if they are explicitly assigned to this KPI.
+    // In a real scenario, an admin might update any KPI. This check assumes non-admin update.
     if (!isUpdater) {
       logger.warn(`User ${currentAuthUserId} is not an authorized updater for KPI ${kpiId}.`);
-      return fail("No está autorizado para actualizar manualmente este KPI.");
+      return fail("No tiene permisos para actualizar este KPI.");
     }
 
-    // 2. Get KPI details to check scoring type and data type
-    const kpiDetails = await firstOrUndefined(db.select().from(kpisTable).where(eq(kpisTable.id, kpiId)));
-    if (!kpiDetails) {
-      return fail("KPI no encontrado.");
+    // 2. Get KPI configuration to determine data type and scoring type
+    const kpiConfig = await firstOrUndefined(db.select().from(kpisTable).where(eq(kpisTable.id, kpiId)));
+
+    if (!kpiConfig) {
+      logger.warn(`KPI configuration not found for ID: ${kpiId}.`);
+      return fail("Configuración de KPI no encontrada.");
     }
 
-    // Ensure KPI is configured for manual update
-    if (!kpiDetails.isManualUpdate) {
-      logger.warn(`KPI ${kpiId} is not configured for manual updates.`);
-      return fail("Este KPI no está configurado para actualizaciones manuales.");
+    // 3. Validate actualValue based on KPI data type
+    let parsedActualValue: number | null = null;
+    if (actualValue !== null && actualValue !== undefined && actualValue !== "") {
+      if (numericDataTypes.has(kpiConfig.dataType)) {
+        parsedActualValue = parseFloat(actualValue);
+        if (isNaN(parsedActualValue)) {
+          return fail(`El valor actual no es un número válido para el tipo de dato ${kpiConfig.dataType}.`);
+        }
+      }
     }
-    
-    // Convert string values to numbers for calculation if data type is numeric
-    const parsedActualValue = actualValue != null ? parseFloat(actualValue) : null;
-    const parsedTargetValue = targetValue != null ? parseFloat(targetValue) : null;
-    const parsedThresholdRed = thresholdRed != null ? parseFloat(thresholdRed) : null;
-    const parsedThresholdYellow = thresholdYellow != null ? parseFloat(thresholdYellow) : null;
 
-
+    // 4. Calculate score and color for 'Goal/Red Flag' KPIs
     let score: number | null = null;
     let color: (typeof kpiColorEnum.enumValues)[number] | null = null;
 
-    // Calculate score and color if scoring type is 'Goal/Red Flag'
-    if (kpiDetails.scoringType === "Goal/Red Flag" && numericDataTypes.has(kpiDetails.dataType)) {
+    if (kpiConfig.scoringType === "Goal/Red Flag") {
+      const parsedTarget = isNonEmptyString(targetValue) ? parseFloat(targetValue) : null;
+      const parsedThresholdRed = isNonEmptyString(thresholdRed) ? parseFloat(thresholdRed) : null;
+      const parsedThresholdYellow = isNonEmptyString(thresholdYellow) ? parseFloat(thresholdYellow) : null;
+
+      if (parsedTarget === null && isNonEmptyString(targetValue)) {
+        return fail("El valor objetivo no es un número válido.");
+      }
+      if (parsedThresholdRed === null && isNonEmptyString(thresholdRed)) {
+        return fail("El umbral rojo no es un número válido.");
+      }
+      if (parsedThresholdYellow === null && isNonEmptyString(thresholdYellow)) {
+        return fail("El umbral amarillo no es un número válido.");
+      }
+
       const calculated = calculateKpiScoreAndColor(
         parsedActualValue,
-        parsedTargetValue,
+        parsedTarget,
         parsedThresholdRed,
         parsedThresholdYellow,
       );
       score = calculated.score;
       color = calculated.color;
-    } else if (kpiDetails.scoringType === "Yes/No" && kpiDetails.dataType === "Number") {
-      // For Yes/No, assuming 1 for Yes, 0 for No. Score could be 100 or 0.
-      if (parsedActualValue === 1) {
+    } else if (kpiConfig.scoringType === "Yes/No") {
+      // For Yes/No, map 'Yes' to 100 (Green), 'No' to 0 (Red), others to null/Red
+      if (actualValue?.toLowerCase() === "yes") {
         score = 100;
         color = "Green";
-      } else if (parsedActualValue === 0) {
+      } else if (actualValue?.toLowerCase() === "no") {
         score = 0;
         color = "Red";
       } else {
         score = null;
-        color = null;
+        color = null; // Or default to Red if strict
       }
+    } else if (kpiConfig.scoringType === "Text") {
+      // For Text KPIs, score and color are not typically calculated automatically
+      score = null;
+      color = null;
     }
-    // For 'Text' scoring type, score and color are typically null or derived differently (out of scope for now)
 
-    // 3. Check if a note is required if KPI turns red/low performance
-    let isNoteRequired = false;
-    const requireNoteSetting = await firstOrUndefined(
-      db
-        .select()
-        .from(appSettingsTable)
-        .where(eq(appSettingsTable.settingKey, "require_note_for_red_kpi")),
+    // 5. Check if note is required for 'Red' KPIs (UC-303)
+    // This requires checking an app setting.
+    const requireNoteSetting: SelectAppSetting | undefined = await firstOrUndefined(
+      db.select().from(appSettingsTable).where(eq(appSettingsTable.settingKey, "require_note_for_red_kpi")),
     );
-    if (requireNoteSetting?.settingValue === 'true' && color === 'Red') {
-      isNoteRequired = true;
+    const isNoteRequired = requireNoteSetting?.settingValue === "true";
+
+    if (isNoteRequired && color === "Red" && (!note || note.trim() === "")) {
+      return fail("Una nota es requerida al actualizar un KPI a estado 'Rojo'.");
     }
 
-    if (isNoteRequired && ((note ?? '').trim() === '')) {        
-      logger.warn(`Note required for KPI ${kpiId} due to red status, but none provided.`);
-      return fail("Se requiere una nota explicativa para las actualizaciones de KPI en estado rojo.");
-    }
-
-
-    const insertData = {
-      kpiId,
+    const insertOrUpdateData: InsertKpiValue = {
+      kpiId: kpiId,
       periodDate: periodDate,
-      actualValue,
-      targetValue,
-      thresholdRed,
-      thresholdYellow,
-      score: score !== null ? String(score) : null, // Convert score back to string for DB
-      color,
+      actualValue: actualValue,
+      targetValue: targetValue,
+      thresholdRed: thresholdRed,
+      thresholdYellow: thresholdYellow,
+      score: score !== null ? String(score) : null, // Store numeric score as string for decimal type
+      color: color,
       updatedByUserId: currentAuthUserId,
       isManualEntry: true,
-      note: (note == null || note === "") ? null : note,
+      note: note,
+      // createdAt and updatedAt handled by schema
     };
 
-    // Use onConflictDoUpdate for upsert (insert or update if exists)
-    const [kpiValue] = await db
+    const [upsertedKpiValue] = await db
       .insert(kpiValuesTable)
-      .values(insertData)
+      .values(insertOrUpdateData)
       .onConflictDoUpdate({
         target: [kpiValuesTable.kpiId, kpiValuesTable.periodDate],
         set: {
-          actualValue,
-          targetValue,
-          thresholdRed,
-          thresholdYellow,
-          score: score !== null ? String(score) : null, // Convert score back to string for DB
-          color,
-          updatedByUserId: currentAuthUserId,
-          isManualEntry: true,
-          note: (note == null || note === "") ? null : note,
+          actualValue: insertOrUpdateData.actualValue,
+          targetValue: insertOrUpdateData.targetValue,
+          thresholdRed: insertOrUpdateData.thresholdRed,
+          thresholdYellow: insertOrUpdateData.thresholdYellow,
+          score: insertOrUpdateData.score,
+          color: insertOrUpdateData.color,
+          updatedByUserId: insertOrUpdateData.updatedByUserId,
+          isManualEntry: insertOrUpdateData.isManualEntry,
+          note: insertOrUpdateData.note,
           updatedAt: new Date(),
         },
       })
       .returning();
 
-    if (!kpiValue) {
-      return fail("Fallo al insertar o actualizar el valor del KPI.");
+    if (!upsertedKpiValue) {
+      logger.error(`Failed to upsert KPI value for KPI ID: ${kpiId}, Period: ${periodDate}`);
+      return fail("Fallo al actualizar el valor manual del KPI.");
     }
 
-    return ok("Valor del KPI actualizado manualmente exitosamente.", kpiValue);
+    logger.info("KPI manual value updated successfully.", { kpiId: upsertedKpiValue.kpiId, periodDate: upsertedKpiValue.periodDate });
+    return ok("Valor de KPI actualizado exitosamente.", upsertedKpiValue);
   } catch (error) {
-    logger.error(`Error updating KPI manual value: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error(`Error updating KPI manual value: ${error instanceof Error ? error.message : String(error)}`, {
+      kpiId,
+      periodDate,
+      actualValue,
+    });
     return fail(`Fallo al actualizar el valor manual del KPI: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -724,9 +808,8 @@ export async function updateKpiManualValueAction(
  * @param {z.infer<typeof setKpiCalculationEquationSchema>} data - Objeto con el ID del KPI y la ecuación de cálculo.
  * @returns {Promise<ActionState<SelectKpi>>} Un objeto ActionState indicando el éxito o fracaso y los datos del KPI actualizado.
  * @notes
- *   - Esta acción actualiza tanto `calculation_equation` como `is_manual_update`.
- *   - La lógica para la evaluación real de la ecuación se manejará en pasos posteriores
- *     (ej. en un cron job o al actualizar KPIs referenciados).
+ *  Esta acción actualiza tanto calculation_equation como is_manual_update.
+ *  La lógica para la evaluación real de la ecuación se manejará en pasos posteriores
  */
 export async function setKpiCalculationEquationAction(
   data: z.infer<typeof setKpiCalculationEquationSchema>,
@@ -744,15 +827,16 @@ export async function setKpiCalculationEquationAction(
     return fail(errorMessage);
   }
 
-  const { kpiId, calculationEquation } = validatedData.data;
-  // If an equation is provided (not null/empty), it's no longer manual. If cleared, it becomes manual.
-  const isManualUpdate = calculationEquation === null || calculationEquation === ""; 
-
   try {
+    const { kpiId, calculationEquation } = validatedData.data;
+
+    // Determine isManualUpdate based on the presence of a calculationEquation
+    const isManualUpdate = !calculationEquation;
+
     const [updatedKpi] = await db
       .update(kpisTable)
       .set({
-        calculationEquation: calculationEquation === "" ? null : calculationEquation,
+        calculationEquation: calculationEquation,
         isManualUpdate: isManualUpdate,
         updatedAt: new Date(),
       })
@@ -760,15 +844,75 @@ export async function setKpiCalculationEquationAction(
       .returning();
 
     if (!updatedKpi) {
-      return fail("KPI no encontrado o no se pudo actualizar la ecuación.");
+      logger.error(`Failed to update KPI calculation equation for ID: ${kpiId}.`);
+      return fail("Fallo al configurar la ecuación de cálculo del KPI.");
     }
 
-    return ok("Ecuación de cálculo del KPI actualizada exitosamente.", updatedKpi);
+    // TODO: Trigger recalculation for this KPI and any dependent KPIs
+    logger.info("KPI calculation equation updated successfully.", { kpiId: updatedKpi.id, isManualUpdate });
+    return ok("Ecuación de cálculo de KPI configurada exitosamente.", updatedKpi);
   } catch (error) {
-    logger.error(
-      `Error setting KPI calculation equation: ${error instanceof Error ? error.message : String(error)}`,
-      { kpiId, calculationEquation },
-    );
+    logger.error(`Error setting KPI calculation equation: ${error instanceof Error ? error.message : String(error)}`, {
+      data,
+    });
     return fail("Fallo al configurar la ecuación de cálculo del KPI.");
+  }
+}
+
+/**
+ * @function enableKpiRollupAction
+ * @description Habilita o deshabilita la funcionalidad de rollup para un KPI (UC-501).
+ * Cuando el rollup se habilita, el KPI se marca como no manual y su ecuación de cálculo se limpia,
+ * ya que su valor será agregado desde organizaciones hijas. Si se deshabilita, se marca como manual.
+ * @param {z.infer<typeof enableKpiRollupSchema>} data - Objeto con el ID del KPI y el estado deseado para rollup.
+ * @returns {Promise<ActionState<SelectKpi>>} Un objeto ActionState indicando el éxito o fracaso y los datos del KPI actualizado.
+ */
+export async function enableKpiRollupAction(
+  data: z.infer<typeof enableKpiRollupSchema>,
+): Promise<ActionState<SelectKpi>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to enable/disable KPI rollup.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  const validatedData = enableKpiRollupSchema.safeParse(data);
+  if (!validatedData.success) {
+    const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
+    logger.error(`Validation error for enableKpiRollupAction: ${errorMessage}`);
+    return fail(errorMessage);
+  }
+
+  try {
+    const { kpiId, rollupEnabled } = validatedData.data;
+
+    // Si el rollup está habilitado, el KPI no es de actualización manual y su ecuación se limpia.
+    // Si el rollup está deshabilitado, el KPI vuelve a ser de actualización manual y su ecuación se limpia.
+    const [updatedKpi] = await db
+      .update(kpisTable)
+      .set({
+        rollupEnabled: rollupEnabled,
+        isManualUpdate: !rollupEnabled, // No es manual si está en rollup, sí es manual si no está en rollup.
+        calculationEquation: null, // El rollup o la entrada manual/nueva ecuación gestionarán el valor.
+        updatedAt: new Date(),
+      })
+      .where(eq(kpisTable.id, kpiId))
+      .returning();
+
+    if (!updatedKpi) {
+      logger.error(`Failed to update KPI rollup status for ID: ${kpiId}.`);
+      return fail("Fallo al actualizar el estado de rollup del KPI.");
+    }
+
+    // TODO: Si rollupEnabled es true, se podría disparar una primera ejecución del cálculo de rollup.
+    // Si rollupEnabled es false, se podría limpiar cualquier valor de rollup previo o restablecerlo.
+
+    logger.info("KPI rollup status updated successfully.", { kpiId: updatedKpi.id, rollupEnabled: updatedKpi.rollupEnabled });
+    return ok("Estado de rollup de KPI actualizado exitosamente.", updatedKpi);
+  } catch (error) {
+    logger.error(`Error enabling/disabling KPI rollup: ${error instanceof Error ? error.message : String(error)}`, {
+      data,
+    });
+    return fail("Fallo al habilitar/deshabilitar el rollup del KPI.");
   }
 }
