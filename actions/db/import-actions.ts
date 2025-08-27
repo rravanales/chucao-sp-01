@@ -73,7 +73,7 @@ const numericDataTypes = new Set<KpiDataType>(["Number", "Percentage", "Currency
  * más robusta podría considerar la dirección del objetivo (mayor es mejor, menor es mejor, en rango).
  * Para este contexto, se asume "mayor o igual es mejor" para el objetivo.
  */
-function calculateKpiScoreAndColor(
+export function calculateKpiScoreAndColor(
   actualValue: number | null,
   targetValue: number | null,
   thresholdRed: number | null,
