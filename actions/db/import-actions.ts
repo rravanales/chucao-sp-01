@@ -1,8 +1,8 @@
 /**
- * @file actions/db/import-actions2.ts
- * @brief Implementa Server Actions para la gestión de importaciones estándar de valores de KPI en DeltaOne.
+ * @file actions/db/import-actions4.ts
+ * @brief Implementa Server Actions para la gestión de importaciones estándar y programadas de valores de KPI en DeltaOne.
  * @description Este archivo contiene funciones del lado del servidor para crear, leer,
- * actualizar, eliminar y ejecutar configuraciones de importación de KPI guardadas.
+ * actualizar, eliminar, ejecutar y programar/desprogramar configuraciones de importación de KPI guardadas.
  * Maneja la lógica de obtención de datos (con un placeholder para la extracción real),
  * aplicación de transformaciones, y actualización de los valores de KPI en la base de datos.
  * Asegura la validación de datos, el cifrado de credenciales sensibles y la protección de accesos.
@@ -31,8 +31,9 @@ import {
   TransformationRule,
   TransformationRuleSchema,
 } from "@/types/import-types"; // Importar los esquemas Zod de KpiMapping y TransformationRule
+import { ScheduleConfig, ScheduleConfigSchema } from "@/types/schedule-types"; // NEW: Import ScheduleConfig and Schema
 import { auth } from "@clerk/nextjs/server";
-import { and, eq, sql, ne } from "drizzle-orm";
+import { and, eq, sql, ne, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getLogger } from "@/lib/logger";
 import { encrypt, decrypt } from "@/lib/encryption";
@@ -58,13 +59,10 @@ async function firstOrUndefined<T>(q: Promise<T[]>): Promise<T | undefined> {
 type KpiDataType = (typeof kpiDataTypeEnum.enumValues)[number];
 const numericDataTypes = new Set<KpiDataType>(["Number", "Percentage", "Currency"]);
 
- /**
+/**
  * Tipo auxiliar para mappings de campos de KPI.
  */
-type KpiMappingField = {
-  sourceField: string;
-  defaultValue?: string | null;
-};
+type KpiMappingField = { sourceField: string; defaultValue?: string | null; };
 
 /**
  * @function calculateKpiScoreAndColor
@@ -94,39 +92,43 @@ export function calculateKpiScoreAndColor(
   let score: number | null = null;
   let color: (typeof kpiColorEnum.enumValues)[number] | null = null;
 
-  // Si hay un valor objetivo, calcular score y color en relación a él
-  if (targetValue !== null && !isNaN(targetValue) && targetValue > 0) {
+  // Lógica de puntuación para Goal/Red Flag
+  if (targetValue !== null) {
     if (actualValue >= targetValue) {
       score = 100;
       color = "Green";
-    } else if (thresholdYellow !== null && !isNaN(thresholdYellow) && actualValue >= thresholdYellow) {
-      // Si hay un umbral amarillo y el actual está por encima o igual
-      score = 50 + ((actualValue - thresholdYellow) / (targetValue - thresholdYellow)) * 50;
+    } else if (thresholdYellow !== null && actualValue >= thresholdYellow) {
+      score = 50; // Ejemplo de puntuación, podría ser más granular
       color = "Yellow";
-    } else if (thresholdRed !== null && !isNaN(thresholdRed) && actualValue >= thresholdRed) {
-      // Si hay un umbral rojo y el actual está por encima o igual, pero por debajo del amarillo
-      score = (actualValue / thresholdRed) * 50; // Simple linear scale to 0-50 for red range
+    } else if (thresholdRed !== null && actualValue >= thresholdRed) {
+      score = 25; // Ejemplo de puntuación
       color = "Red";
     } else {
-      // Por debajo de todos los umbrales
+      score = 0;
+      color = "Red"; // Por debajo de todos los umbrales
+    }
+  } else if (thresholdRed !== null || thresholdYellow !== null) {
+    // Si no hay objetivo explícito, pero hay umbrales de riesgo.
+    // Asumimos que si se está por encima del umbral amarillo/rojo, es una "Advertencia" o "Rojo".
+    if (thresholdYellow !== null && actualValue >= thresholdYellow) {
+      score = 75; // Por encima de amarillo, pero sin objetivo claro
+      color = "Yellow";
+    } else if (thresholdRed !== null && actualValue >= thresholdRed) {
+      score = 50; // Por encima de rojo, pero sin objetivo claro
+      color = "Red";
+    } else if (actualValue < (thresholdRed ?? thresholdYellow ?? -Infinity)) { // Si está por debajo de cualquier umbral definido
       score = 0;
       color = "Red";
-    }
-  } else if (thresholdRed !== null && !isNaN(thresholdRed)) {
-    // Si no hay objetivo pero sí umbral rojo, y el valor actual es menor
-    if (actualValue < thresholdRed) {
-      color = "Red";
-      score = 0; // O un valor proporcional
-    } else {
-      color = "Green"; // Si está por encima del umbral rojo, asume verde si no hay más info
-      score = 100;
+    } else { // Si no cumple ningún umbral (ej. están null o no se alcanza)
+      score = null;
+      color = null;
     }
   } else {
-    // Si no hay objetivo ni umbrales, el score y color son indeterminados o se asumen neutrales
+    // Si no hay target ni umbrales definidos, no se puede calcular un score/color significativo para Goal/Red Flag
     score = null;
     color = null;
   }
-
+  
   // Asegurar que el score no exceda 100 ni sea menor que 0
   if (score !== null) {
     score = Math.max(0, Math.min(100, score));
@@ -135,8 +137,8 @@ export function calculateKpiScoreAndColor(
   return { score, color };
 }
 
-/* -------------------------------------------------------------------------- */
-/*                            Esquemas de Validación Zod                        */
+/* --------------------------------------------------------------------------  */
+/*                             Esquemas de Validación Zod                         */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -146,14 +148,14 @@ export function calculateKpiScoreAndColor(
  * @property {string} connectionId - ID de la conexión de importación, UUID requerido.
  * @property {KpiMapping[]} kpiMappings - Array de objetos de mapeo de KPI, requerido.
  * @property {TransformationRule[] | null} transformations - Array de reglas de transformación, opcional y nullable.
- * @property {any | null} scheduleConfig - Configuración de programación, opcional y nullable.
+ * @property {ScheduleConfig | null} scheduleConfig - Configuración de programación, opcional y nullable.
  */
 const createSavedKpiImportSchema = z.object({
   name: z.string().min(1, "El nombre de la importación es requerido.").max(255, "El nombre no puede exceder los 255 caracteres."),
   connectionId: z.string().uuid("ID de conexión inválido."),
   kpiMappings: z.array(KpiMappingSchema).min(1, "Debe haber al menos un mapeo de KPI."),
   transformations: z.array(TransformationRuleSchema).nullable().optional(),
-  scheduleConfig: z.any().nullable().optional(), // Flexible para la configuración del cron job
+  scheduleConfig: ScheduleConfigSchema.nullable().optional(), // Updated to use ScheduleConfigSchema
 });
 
 /**
@@ -165,7 +167,7 @@ const createSavedKpiImportSchema = z.object({
  * @property {string} [connectionId] - ID de la conexión de importación, UUID opcional.
  * @property {KpiMapping[]} [kpiMappings] - Array de objetos de mapeo de KPI, opcional.
  * @property {TransformationRule[] | null} [transformations] - Array de reglas de transformación, opcional y nullable.
- * @property {any | null} [scheduleConfig] - Configuración de programación, opcional y nullable.
+ * @property {ScheduleConfig | null} [scheduleConfig] - Configuración de programación, opcional y nullable.
  */
 const updateSavedKpiImportSchema = z.object({
   id: z.string().uuid("ID de importación inválido."),
@@ -173,7 +175,7 @@ const updateSavedKpiImportSchema = z.object({
   connectionId: z.string().uuid("ID de conexión inválido.").optional(),
   kpiMappings: z.array(KpiMappingSchema).min(1, "Debe haber al menos un mapeo de KPI.").optional(),
   transformations: z.array(TransformationRuleSchema).nullable().optional(),
-  scheduleConfig: z.any().nullable().optional(),
+  scheduleConfig: ScheduleConfigSchema.nullable().optional(), // Updated to use ScheduleConfigSchema
 });
 
 /**
@@ -203,8 +205,28 @@ const executeSavedKpiImportSchema = z.object({
   id: z.string().uuid("ID de importación inválido."),
 });
 
-/* -------------------------------------------------------------------------- */
-/*                               Server Actions                               */
+/**
+ * @schema scheduleKpiImportSchema
+ * @description Esquema de validación para programar una importación de KPI guardada (UC-204).
+ * @property {string} id - ID de la importación guardada a programar, UUID requerido.
+ * @property {ScheduleConfig} scheduleConfig - Configuración de la programación.
+ */
+const scheduleKpiImportSchema = z.object({
+  id: z.string().uuid("ID de importación inválido."),
+  scheduleConfig: ScheduleConfigSchema,
+});
+
+/**
+ * @schema unscheduleKpiImportSchema
+ * @description Esquema de validación para desprogramar una importación de KPI guardada (UC-204).
+ * @property {string} id - ID de la importación guardada a desprogramar, UUID requerido.
+ */
+const unscheduleKpiImportSchema = z.object({
+  id: z.string().uuid("ID de importación inválido."),
+});
+
+/* --------------------------------------------------------------------------  */
+/*                                Server Actions                                */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -247,9 +269,11 @@ export async function createSavedKpiImportAction(
         createdById: userId,
         createdAt: new Date(),
         updatedAt: new Date(),
+        scheduleConfig: validatedData.data.scheduleConfig ? validatedData.data.scheduleConfig as any : null, // Ensure JSONB is handled
       })
       .returning();
 
+    logger.info("Saved KPI import created successfully.", { importId: newImport.id, name: newImport.name });
     return ok("Importación de KPI guardada creada exitosamente.", newImport);
   } catch (error) {
     logger.error(
@@ -273,8 +297,9 @@ export async function getSavedKpiImportsAction(): Promise<ActionState<SelectSave
   }
 
   try {
-    const savedImports = await db.select().from(savedImportsTable);
-    return ok("Importaciones de KPI guardadas obtenidas exitosamente.", savedImports);
+    const imports = await db.select().from(savedImportsTable);
+    logger.info(`Retrieved ${imports.length} saved KPI imports.`);
+    return ok("Importaciones de KPI guardadas obtenidas exitosamente.", imports);
   } catch (error) {
     logger.error(
       `Error retrieving saved KPI imports: ${error instanceof Error ? error.message : String(error)}`
@@ -284,14 +309,12 @@ export async function getSavedKpiImportsAction(): Promise<ActionState<SelectSave
 }
 
 /**
- * @function getSavedKpiImportByIdAction
- * @description Obtiene una configuración de importación de KPI guardada específica por su ID.
+ * @function getSavedImportByIdAction
+ * @description Obtiene una configuración de importación de KPI guardada por su ID.
  * @param {string} id - El ID de la importación guardada a recuperar.
  * @returns {Promise<ActionState<SelectSavedImport>>} Un objeto ActionState con la importación guardada o un mensaje de error.
  */
-export async function getSavedKpiImportByIdAction(
-  id: string
-): Promise<ActionState<SelectSavedImport>> {
+export async function getSavedImportByIdAction(id: string): Promise<ActionState<SelectSavedImport>> {
   const { userId } = await auth();
   if (!userId) {
     logger.warn("Unauthorized attempt to retrieve saved KPI import by ID.");
@@ -364,7 +387,11 @@ export async function updateSavedKpiImportAction(
 
     const [updatedImport] = await db
       .update(savedImportsTable)
-      .set({ ...updateData, updatedAt: new Date() })
+      .set({
+        ...updateData,
+        updatedAt: new Date(),
+        scheduleConfig: updateData.scheduleConfig ? updateData.scheduleConfig as any : null, // Ensure JSONB is handled
+      })
       .where(eq(savedImportsTable.id, importId))
       .returning();
 
@@ -372,6 +399,7 @@ export async function updateSavedKpiImportAction(
       return fail("Importación de KPI guardada no encontrada.");
     }
 
+    logger.info("Saved KPI import updated successfully.", { importId: updatedImport.id, name: updatedImport.name });
     return ok("Importación de KPI guardada actualizada exitosamente.", updatedImport);
   } catch (error) {
     logger.error(
@@ -409,10 +437,11 @@ export async function deleteSavedKpiImportAction(id: string): Promise<ActionStat
       .returning();
 
     if (!deletedImport) {
-      return fail("Importación de KPI guardada no encontrada para eliminar.");
+      return fail("Importación de KPI guardada no encontrada.");
     }
 
-    return ok("Importación de KPI guardada eliminada exitosamente.", undefined);
+    logger.info("Saved KPI import deleted successfully.", { importId: deletedImport.id });
+    return ok("Importación de KPI guardada eliminada exitosamente.");
   } catch (error) {
     logger.error(
       `Error deleting saved KPI import: ${error instanceof Error ? error.message : String(error)}`,
@@ -428,20 +457,29 @@ export async function deleteSavedKpiImportAction(id: string): Promise<ActionStat
  * Recupera la configuración de importación, la conexión, extrae (simula) datos,
  * aplica transformaciones, mapea a KPIs y actualiza la tabla kpi_values.
  * @param {z.infer<typeof executeSavedKpiImportSchema>} data - Objeto con el ID de la importación a ejecutar.
+ * @param {string | null} [executorUserId = null] - El ID del usuario que ejecuta la acción.
+ *   Esto permite que la acción sea invocada por un usuario autenticado o por un sistema (ej. cron job)
+ *   que pasa el ID del creador de la importación.
  * @returns {Promise<ActionState<undefined>>} Un objeto ActionState indicando el éxito o un mensaje de error.
  * @notes
- *  La extracción real de datos de diversas fuentes de bases de datos o archivos Excel
- *  es una tarea compleja y para este paso se ha implementado un placeholder simulado.
- *  Los valores se almacenan como texto en kpi_values para flexibilidad.
- *  El cálculo de score y color es una implementación simplificada para KPIs 'Goal/Red Flag'.
+ *   - La extracción real de datos de diversas fuentes de bases de datos o archivos Excel
+ *     es una tarea compleja y para este paso se ha implementado un placeholder simulado.
+ *   - Los valores se almacenan como texto en kpi_values para flexibilidad.
+ *   - El cálculo de score y color es una implementación simplificada para KPIs 'Goal/Red Flag'.
+ *   - Si `executorUserId` es `null`, intentará usar el `userId` de `auth()`. Si ambos son `null`, fallará.
  */
 export async function executeSavedKpiImportAction(
-  data: z.infer<typeof executeSavedKpiImportSchema>
+  data: z.infer<typeof executeSavedKpiImportSchema>,
+  executorUserId: string | null = null,
 ): Promise<ActionState<undefined>> {
-  const { userId } = await auth();
-  if (!userId) {
-    logger.warn("Unauthorized attempt to execute saved KPI import.");
-    return fail("No autorizado. Debe iniciar sesión.");
+  const { userId: authUserId } = await auth();
+  // Determina el ID del usuario que será registrado como quien realizó la actualización.
+  // Prioriza el executorUserId explícitamente pasado (ej. por cron), luego el usuario autenticado.
+  const actualUpdaterUserId = executorUserId || authUserId;
+
+  if (!actualUpdaterUserId) {
+    logger.warn("Unauthorized attempt to execute saved KPI import: No executor user ID provided.");
+    return fail("No autorizado. Debe iniciar sesión o proporcionar un ID de usuario ejecutor.");
   }
 
   const validatedData = executeSavedKpiImportSchema.safeParse(data);
@@ -450,7 +488,6 @@ export async function executeSavedKpiImportAction(
     logger.error(`Validation error for executeSavedKpiImportAction: ${errorMessage}`);
     return fail(errorMessage);
   }
-
   const { id: importId } = validatedData.data;
 
   try {
@@ -462,218 +499,171 @@ export async function executeSavedKpiImportAction(
       return fail("Configuración de importación de KPI no encontrada.");
     }
 
-    // 2. Obtener la conexión de importación
+    // 2. Obtener la conexión de importación y extraer (simular) datos
+    let rawData: Record<string, unknown>[] = [];
     const connection = await firstOrUndefined(
       db.select().from(importConnectionsTable).where(eq(importConnectionsTable.id, savedImport.connectionId))
     );
     if (!connection) {
-      logger.error(`Import connection with ID ${savedImport.connectionId} not found.`);
+      logger.error(`Import connection not found for saved import ID: ${importId}.`);
       return fail("Conexión de importación no encontrada.");
     }
+    const decryptedDetails = decrypt(connection.connectionDetails as string);
+    const connectionDetails = JSON.parse(decryptedDetails);
 
-    // 3. Descifrar detalles de conexión (asumiendo que connectionDetails es un JSON string cifrado)
-    let decryptedConnectionDetails: any;
-    try {
-      const decryptedString = decrypt(String(connection.connectionDetails));
-
-      decryptedConnectionDetails = JSON.parse(decryptedString);
-    } catch (error) {
-      logger.error(
-        `Failed to decrypt or parse connection details for connection ${connection.id}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-      return fail("Fallo al descifrar o parsear los detalles de la conexión.");
-    }
-
-    // 4. Simular extracción de datos (placeholder avanzado)
-    // En una implementación real, aquí se usarían librerías y drivers para conectar
-    // y extraer datos de la fuente real (ej. exceljs, pg, tedious, etc.).
-    let rawData: Record<string, unknown>[] = [];
-    logger.info(`Simulating data extraction from connection type: ${connection.connectionType}`);
-
+    // Placeholder for data extraction based on connectionType
+    // This section simulates data extraction from different sources.
     if (connection.connectionType === "Excel") {
-      // Simular datos de un archivo Excel simple
+      // Simulate data from Excel
+      // In a real scenario, you'd use a library to parse the Excel file
       rawData = [
-        { Date: "2024-01-01", "Sales KPI": 150000, "Marketing Spend": 25000, "Target Sales": 145000, "Red Threshold": 120000, "Yellow Threshold": 135000, Note: "Increased ad spend" },
-        { Date: "2024-02-01", "Sales KPI": 160000, "Marketing Spend": 27000, "Target Sales": 150000, "Red Threshold": 125000, "Yellow Threshold": 140000, Note: "New product launch" },
-        { Date: "2024-03-01", "Sales KPI": 140000, "Marketing Spend": 24000, "Target Sales": 155000, "Red Threshold": 130000, "Yellow Threshold": 145000, Note: "Market downturn" },
+        { "KPI_ID": "a1b2c3d4-e5f6-7890-1234-567890abcdef", "PERIOD_DATE": "2024-01-01T00:00:00Z", "ACTUAL": "100", "TARGET": "120", "NOTE": "Q1 Performance" },
+        { "KPI_ID": "f1e2d3c4-b5a6-9876-5432-10fedcba9876", "PERIOD_DATE": "2024-01-01T00:00:00Z", "ACTUAL": "50", "THRESHOLD_RED": "40" },
       ];
+      logger.info(`Simulating Excel data extraction for connection ${connection.name}.`);
     } else if (["Microsoft SQL Server", "Oracle", "MySQL", "PostgreSQL", "Hive"].includes(connection.connectionType)) {
-      // Simular datos de una base de datos con una consulta SQL (el query_string estaría en decryptedConnectionDetails)
-      // Para la simulación, generamos datos genéricos.
-      const tableName = decryptedConnectionDetails.tableName || "default_table";
-      logger.info(`Simulating query against table: ${tableName}`);
+      // Simulate data from a database
+      // In a real scenario, you'd use a DB client (e.g., 'pg' for PostgreSQL) with connectionDetails
       rawData = [
-        { Period: "2024-01-15", Value: 120.5, Goal: 125, Status: "Good", Details: "Q1 performance" },
-        { Period: "2024-02-15", Value: 110.2, Goal: 120, Status: "Needs Attention", Details: "Sales dip" },
-        { Period: "2024-03-15", Value: 130.8, Goal: 130, Status: "Excellent", Details: "Exceeded targets" },
+        { "kpi_id_col": "a1b2c3d4-e5f6-7890-1234-567890abcdef", "date_col": "2024-02-01T00:00:00Z", "value_col": "110", "goal_col": "130" },
+        { "kpi_id_col": "f1e2d3c4-b5a6-9876-5432-10fedcba9876", "date_col": "2024-02-01T00:00:00Z", "value_col": "45", "red_threshold_col": "40" },
       ];
+      logger.info(`Simulating DB data extraction for connection ${connection.name}.`);
     } else {
-      logger.warn(`Unsupported connection type for data extraction: ${connection.connectionType}`);
-      return ok("Importación ejecutada, pero no se extrajeron datos debido a un tipo de conexión no soportado en la simulación.", undefined);
+      logger.warn(`Connection type ${connection.connectionType} not supported for data extraction in this placeholder implementation.`);
+      return fail(`Tipo de conexión ${connection.connectionType} no soportado para la extracción de datos.`);
     }
 
     if (rawData.length === 0) {
-      return ok("Importación ejecutada, pero no se extrajeron datos de la fuente simulada.", undefined);
+      logger.info(`Import executed, but no data extracted for import ID: ${importId}.`);
+      // Update lastRunAt even if no data was extracted, to prevent immediate re-execution by cron
+      await db.update(savedImportsTable).set({ lastRunAt: new Date(), updatedAt: new Date() }).where(eq(savedImportsTable.id, importId));
+      return ok("Importación ejecutada, pero no se extrajeron datos.");
     }
 
-    // 5. Aplicar transformaciones (UC-203)
-    // Parseo con Zod y normalización: asegurar que 'parameters' siempre exista
-    // para cumplir con el tipo TransformationRule (evita TS2345).
-    const rawTransformations = z
+    // // 3. Aplicar transformaciones (UC-203)
+    // const transformations: TransformationRule[] = Array.isArray(savedImport.transformations) ? savedImport.transformations : [];
+    // let transformedData = applyTransformations(rawData, transformations);
+
+    // 3. Parseo seguro de kpiMappings y transformations desde JSONB (evita 'unknown')
+    const parsedMappingsResult = z.array(KpiMappingSchema).safeParse(savedImport.kpiMappings ?? []);
+    if (!parsedMappingsResult.success) {
+      logger.error(`Invalid kpiMappings JSON shape for import ${importId}: ${parsedMappingsResult.error.message}`);
+      return fail("La configuración de mapeo (kpiMappings) es inválida.");
+    }
+    const kpiMappings: KpiMapping[] = parsedMappingsResult.data;
+
+    const parsedTransfResult = z
       .array(TransformationRuleSchema)
-      .parse(savedImport.transformations ?? []);
+      .safeParse(savedImport.transformations ?? []);
+    // Normaliza para que 'parameters' siempre exista (TransformationRule lo requiere)
+    const transformations: TransformationRule[] = parsedTransfResult.success
+      ? parsedTransfResult.data.map((r) => ({
+          ...r,
+          parameters: r.parameters ?? {},
+        })) as TransformationRule[]
+      : [];
 
-    const transformations: TransformationRule[] = rawTransformations.map((t) => ({
-      ...t,
-      // si viene indefinido, garantizamos un objeto vacío
-      parameters: t.parameters ?? {},
-    }));
-
+    // 4. Aplicar transformaciones (UC-203)
     let transformedData = applyTransformations(rawData, transformations);
+    logger.info(`Applied ${transformations.length} transformations.`);
 
-    logger.info(`Applied ${transformations.length} transformations, resulting in ${transformedData.length} rows.`, {
-      transformedDataLength: transformedData.length,
-    });
-
-    // 6. Mapear y cargar datos en kpi_values
-    const kpiMappings = z.array(KpiMappingSchema).parse(savedImport.kpiMappings ?? []);
-
+    // 5. Mapear datos a KPIs y actualizar kpi_values
     const kpiValuesToInsert: InsertKpiValue[] = [];
-    for (const mapping of kpiMappings) {    
-      // Obtener el KPI de destino para validar tipos y configuraciones de puntuación
-      const targetKpi = await firstOrUndefined(db.select().from(kpisTable).where(eq(kpisTable.id, mapping.kpiId)));
-      if (!targetKpi) {
-        logger.warn(`Target KPI with ID ${mapping.kpiId} not found. Skipping mapping.`);
-        continue;
-      }
+    const kpiIdsToFetch = Array.from(new Set(kpiMappings.map((m: KpiMapping) => m.kpiId)));
 
-      for (const row of transformedData) {
-        let actualValue: string | null = null;
-        let targetValue: string | null = null;
-        let thresholdRed: string | null = null;
-        let thresholdYellow: string | null = null;
-        let note: string | null = null;
-        let periodDate: Date | null = null;
+    // Uso de inArray para evitar SQL manual
+    const kpis = await db
+      .select()
+      .from(kpisTable)
+      .where(inArray(kpisTable.id, kpiIdsToFetch));    
+    const kpiMap = new Map<string, SelectKpi>(kpis.map(k => [k.id, k]));
 
-        // // Helper para extraer valor de la fila o defaultValue
-        const getValue = (fieldMapping?: KpiMappingField | null, rowData: Record<string, unknown> = row): string | null => {
-          if (!fieldMapping) return null;
-          const value = rowData[fieldMapping.sourceField];
-          if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-            return fieldMapping.defaultValue || null;
-          }
-          return String(value);
-        };
-
-        const periodDateString = getValue(mapping.periodDate);
-        if (periodDateString) {
-          // Tomar solo la parte de fecha si viene en ISO con hora.
-          const isoDate =
-            periodDateString.includes("T")
-              ? periodDateString.split("T")[0]
-              : periodDateString;
-
-          periodDate = new Date(isoDate);        
-          if (isNaN(periodDate.getTime())) {
-            logger.warn(`Invalid date format for KPI ${targetKpi.id} periodDate: ${periodDateString}. Skipping row.`);
-            continue;
-          }
-        } else {
-          logger.warn(`Period date not found for KPI ${targetKpi.id}. Skipping row.`);
+    for (const row of transformedData) {
+      for (const mapping of kpiMappings) {    
+        const kpi = kpiMap.get(mapping.kpiId);
+        if (!kpi) {
+          logger.warn(`KPI with ID ${mapping.kpiId} not found during import mapping.`);
           continue;
         }
 
-        actualValue = getValue(mapping.actualValue);
-        targetValue = getValue(mapping.targetValue);
-        thresholdRed = getValue(mapping.thresholdRed);
-        thresholdYellow = getValue(mapping.thresholdYellow);
-        note = getValue(mapping.note);
-
-        // Validar y convertir tipos de datos si el KPI es numérico
-        let parsedActual: number | null = null;
-        let parsedTarget: number | null = null;
-        let parsedThresholdRed: number | null = null;
-        let parsedThresholdYellow: number | null = null;
-
-        const parseNumericValue = (val: string | null, kpiId: string, fieldName: string): number | null => {
-          if (val === null) return null;
-          const num = parseFloat(val);
-          if (isNaN(num)) {
-            logger.warn(
-              `Non-numeric value "${val}" found for numeric KPI ${kpiId} field "${fieldName}". Treating as null.`
-            );
-            return null;
-          }
-          return num;
+        // Extract values using sourceField or defaultValue
+        const getMappedValue = (fieldMap: KpiMappingField) => {
+          const value = row[fieldMap.sourceField];
+          return (value !== undefined && value !== null && String(value).trim() !== '')
+            ? String(value)
+            : (fieldMap.defaultValue !== undefined && fieldMap.defaultValue !== null ? String(fieldMap.defaultValue) : null);
         };
 
-        const isNumericKpi = numericDataTypes.has(targetKpi.dataType); // Reutilizar el Set de numericDataTypes
-
-        if (isNumericKpi) {
-          parsedActual = parseNumericValue(actualValue, targetKpi.id, "actualValue");
-          parsedTarget = parseNumericValue(targetValue, targetKpi.id, "targetValue");
-          parsedThresholdRed = parseNumericValue(thresholdRed, targetKpi.id, "thresholdRed");
-          parsedThresholdYellow = parseNumericValue(thresholdYellow, targetKpi.id, "thresholdYellow");
+        const periodDateString = getMappedValue(mapping.periodDate);
+        if (!periodDateString) {
+          logger.warn(`Missing periodDate for KPI ${kpi.id} in row: ${JSON.stringify(row)}`);
+          continue;
         }
+
+        // Manejar ISO strings: tomar solo YYYY-MM-DD
+        const parsedPeriodDate = periodDateString.includes("T")
+          ? periodDateString.split("T")[0]
+          : periodDateString;        
+
+        const actualValue = getMappedValue(mapping.actualValue);
+        const targetValue = mapping.targetValue ? getMappedValue(mapping.targetValue) : null;
+        const thresholdRed = mapping.thresholdRed ? getMappedValue(mapping.thresholdRed) : null;
+        const thresholdYellow = mapping.thresholdYellow ? getMappedValue(mapping.thresholdYellow) : null;
+        const note = mapping.note ? getMappedValue(mapping.note) : null;
 
         let score: number | null = null;
         let color: (typeof kpiColorEnum.enumValues)[number] | null = null;
 
-        // Calcular score y color para KPIs de tipo 'Goal/Red Flag'
-        if (targetKpi.scoringType === "Goal/Red Flag" && isNumericKpi) {
-          ({ score, color } = calculateKpiScoreAndColor(
-            parsedActual,
-            parsedTarget,
+        // Convert actual and threshold values to numbers if KPI data type is numeric
+        // Use a helper `isNonEmptyString` to safely parse floats (D-2025-0030)
+        const isNonEmptyString = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+
+        const parsedActualValue = isNonEmptyString(actualValue) ? parseFloat(actualValue) : null;
+        const parsedTargetValue = isNonEmptyString(targetValue) ? parseFloat(targetValue) : null;
+        const parsedThresholdRed = isNonEmptyString(thresholdRed) ? parseFloat(thresholdRed) : null;
+        const parsedThresholdYellow = isNonEmptyString(thresholdYellow) ? parseFloat(thresholdYellow) : null;
+
+        if (kpi.scoringType === "Goal/Red Flag" && parsedActualValue !== null) {
+          const calculated = calculateKpiScoreAndColor(
+            parsedActualValue,
+            parsedTargetValue,
             parsedThresholdRed,
             parsedThresholdYellow
-          ));
-        } else if (targetKpi.scoringType === "Yes/No") {
-          // Para Yes/No, el actualValue 1 = Green, 0 = Red
-          const numericActual = parseNumericValue(actualValue, targetKpi.id, "actualValue");
-          if (numericActual === 1) {
-            color = "Green";
-            score = 100;
-          } else if (numericActual === 0) {
-            color = "Red";
-            score = 0;
-          } else {
-            color = null;
-            score = null;
-          }
+          );
+          score = calculated.score;
+          color = calculated.color;
+        } else if (kpi.scoringType === "Yes/No" && parsedActualValue !== null) {
+          // Assuming 1 for Yes, 0 for No
+          score = parsedActualValue === 1 ? 100 : 0;
+          color = parsedActualValue === 1 ? "Green" : "Red";
         }
-        // Para Text scoringType, score y color serán null
+        // No score/color for 'Text' KPIs
 
         kpiValuesToInsert.push({
-          kpiId: targetKpi.id,
-          periodDate: periodDate.toISOString().split("T")[0], // Convertir a ISO string y tomar solo la fecha
+          kpiId: kpi.id,
+          periodDate: parsedPeriodDate, // YYYY-MM-DD como string
           actualValue: actualValue,
           targetValue: targetValue,
           thresholdRed: thresholdRed,
           thresholdYellow: thresholdYellow,
-          score: score !== null ? String(score) : null, // Almacenar score como string si es numérico
+          score: score !== null ? String(score) : null, // Store numeric score as string for Drizzle decimal type
           color: color,
-          updatedByUserId: userId,
-          isManualEntry: false, // Las importaciones no son entradas manuales
+          updatedByUserId: actualUpdaterUserId, // Use the determined updater ID
+          isManualEntry: false, // This is an import, not manual entry
           note: note,
         });
       }
     }
 
-    // 7. Realizar upsert de los valores de KPI
     if (kpiValuesToInsert.length > 0) {
-      // Drizzle no tiene un upsert directo para múltiples filas en una sola llamada para postgres.
-      // Se puede simular con un bucle o una sentencia ON CONFLICT (que se puede construir).
-      // Para la simplicidad y el cumplimiento del formato, realizaremos inserciones individuales con ON CONFLICT.
-      // Esto podría ser optimizado con COPY FROM en un entorno de producción o una función SQL.
+      // Upsert: Try to insert, if conflict (kpiId, periodDate), update
       await db.transaction(async (tx) => {
         for (const kpiValue of kpiValuesToInsert) {
-          await tx
-            .insert(kpiValuesTable)
+          await tx.insert(kpiValuesTable)
             .values(kpiValue)
             .onConflictDoUpdate({
-              target: [kpiValuesTable.kpiId, kpiValuesTable.periodDate], // Clave única para el conflicto
+              target: [kpiValuesTable.kpiId, kpiValuesTable.periodDate],
               set: {
                 actualValue: kpiValue.actualValue,
                 targetValue: kpiValue.targetValue,
@@ -689,23 +679,127 @@ export async function executeSavedKpiImportAction(
             });
         }
       });
-      logger.info(`Successfully processed ${kpiValuesToInsert.length} KPI value entries.`);
+      logger.info(`Successfully processed ${kpiValuesToInsert.length} KPI values.`);
     } else {
-      logger.info("No KPI values to insert after mapping and transformation.");
+      logger.info(`No valid KPI values to insert after mapping for import ID: ${importId}.`);
     }
 
-    // 8. Actualizar last_run_at en saved_imports
-    await db
-      .update(savedImportsTable)
+    // 6. Actualizar lastRunAt de la importación guardada
+    await db.update(savedImportsTable)
       .set({ lastRunAt: new Date(), updatedAt: new Date() })
       .where(eq(savedImportsTable.id, importId));
 
-    return ok("Importación de KPI ejecutada exitosamente.", undefined);
+    logger.info(`KPI import ${savedImport.name} (ID: ${savedImport.id}) executed successfully.`);
+    return ok("Importación de KPI ejecutada exitosamente.");
   } catch (error) {
-    logger.error(
-      `Error executing saved KPI import: ${error instanceof Error ? error.message : String(error)}`,
-      { importId }
-    );
+    logger.error(`Error executing saved KPI import: ${error instanceof Error ? error.message : String(error)}`, { importId });
     return fail(`Fallo al ejecutar la importación de KPI: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * @function scheduleKpiImportAction
+ * @description Programa una importación de KPI guardada para que se ejecute de forma recurrente (UC-204).
+ * Almacena la configuración de programación en la base de datos.
+ * @param {z.infer<typeof scheduleKpiImportSchema>} data - Objeto con el ID de la importación y la configuración de programación.
+ * @returns {Promise<ActionState<SelectSavedImport>>} Un objeto ActionState con la importación actualizada o un mensaje de error.
+ */
+export async function scheduleKpiImportAction(
+  data: z.infer<typeof scheduleKpiImportSchema>
+): Promise<ActionState<SelectSavedImport>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to schedule KPI import.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  const validatedData = scheduleKpiImportSchema.safeParse(data);
+  if (!validatedData.success) {
+    const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
+    logger.error(`Validation error for scheduleKpiImportAction: ${errorMessage}`);
+    return fail(errorMessage);
+  }
+
+  const { id: importId, scheduleConfig } = validatedData.data;
+
+  try {
+    const existingImport = await firstOrUndefined(
+      db.select().from(savedImportsTable).where(eq(savedImportsTable.id, importId))
+    );
+    if (!existingImport) {
+      return fail("Importación de KPI guardada no encontrada.");
+    }
+
+    const [updatedImport] = await db
+      .update(savedImportsTable)
+      .set({
+        scheduleConfig: scheduleConfig as any, // Drizzle's jsonb type is any, cast for type safety
+        updatedAt: new Date(),
+      })
+      .where(eq(savedImportsTable.id, importId))
+      .returning();
+
+    if (!updatedImport) {
+        return fail("Fallo al encontrar la importación para actualizar.");
+    }
+
+    logger.info(`KPI import ${updatedImport.name} (ID: ${updatedImport.id}) scheduled successfully.`);
+    return ok("Importación de KPI programada exitosamente.", updatedImport);
+  } catch (error) {
+    logger.error(`Error scheduling KPI import: ${error instanceof Error ? error.message : String(error)}`, { data });
+    return fail(`Fallo al programar la importación de KPI: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * @function unscheduleKpiImportAction
+ * @description Desprograma una importación de KPI guardada, eliminando su configuración de programación.
+ * @param {z.infer<typeof unscheduleKpiImportSchema>} data - Objeto con el ID de la importación a desprogramar.
+ * @returns {Promise<ActionState<SelectSavedImport>>} Un objeto ActionState con la importación actualizada o un mensaje de error.
+ */
+export async function unscheduleKpiImportAction(
+  data: z.infer<typeof unscheduleKpiImportSchema>
+): Promise<ActionState<SelectSavedImport>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to unschedule KPI import.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  const validatedData = unscheduleKpiImportSchema.safeParse(data);
+  if (!validatedData.success) {
+    const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
+    logger.error(`Validation error for unscheduleKpiImportAction: ${errorMessage}`);
+    return fail(errorMessage);
+  }
+
+  const { id: importId } = validatedData.data;
+
+  try {
+    const existingImport = await firstOrUndefined(
+      db.select().from(savedImportsTable).where(eq(savedImportsTable.id, importId))
+    );
+    if (!existingImport) {
+      return fail("Importación de KPI guardada no encontrada.");
+    }
+
+    const [updatedImport] = await db
+      .update(savedImportsTable)
+      .set({
+        scheduleConfig: null, // Set scheduleConfig to null to unschedule
+        updatedAt: new Date(),
+      })
+      .where(eq(savedImportsTable.id, importId))
+      .returning();
+
+    if (!updatedImport) {
+        return fail("Fallo al encontrar la importación para actualizar.");
+    }
+
+    logger.info(`KPI import ${updatedImport.name} (ID: ${updatedImport.id}) unscheduled successfully.`);
+    return ok("Importación de KPI desprogramada exitosamente.", updatedImport);
+  } catch (error) {
+    logger.error(`Error unscheduling KPI import: ${error instanceof Error ? error.message : String(error)}`, { data });
+    return fail(`Fallo al desprogramar la importación de KPI: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
