@@ -35,7 +35,7 @@ import { auth } from "@clerk/nextjs/server";
 import { and, eq, isNull, ne } from "drizzle-orm";
 import { z } from "zod";
 import { getLogger } from "@/lib/logger";
-import { calculateKpiScoreAndColor } from "@/actions/db/import-actions"; // Reutilizar la función de cálculo de score/color
+import { calculateKpiScoreAndColor } from "@/lib/kpi-scoring"; // Módulo compartido sin "use server"
 import { extractKpiReferences } from "@/lib/kpi-calculation-engine"; // Nueva importación para el motor de cálculo
 
 const logger = getLogger("kpi-actions");

@@ -1,5 +1,5 @@
 /**
- * @file actions/db/import-actions4.ts
+ * @file actions/db/import-actions.ts
  * @brief Implementa Server Actions para la gestión de importaciones estándar y programadas de valores de KPI en DeltaOne.
  * @description Este archivo contiene funciones del lado del servidor para crear, leer,
  * actualizar, eliminar, ejecutar y programar/desprogramar configuraciones de importación de KPI guardadas.
@@ -38,6 +38,7 @@ import { z } from "zod";
 import { getLogger } from "@/lib/logger";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { applyTransformations } from "@/lib/data-transformer";
+import { calculateKpiScoreAndColor } from "@/lib/kpi-scoring";
 
 const logger = getLogger("import-actions");
 
@@ -56,6 +57,7 @@ async function firstOrUndefined<T>(q: Promise<T[]>): Promise<T | undefined> {
  * @typedef {'Number' | 'Percentage' | 'Currency' | 'Text'} KpiDataType
  * @description Define los tipos de datos posibles para un KPI.
  */
+//type KpiDataType = (typeof kpiDataTypeEnum.enumValues)[number];
 type KpiDataType = (typeof kpiDataTypeEnum.enumValues)[number];
 const numericDataTypes = new Set<KpiDataType>(["Number", "Percentage", "Currency"]);
 
@@ -64,78 +66,7 @@ const numericDataTypes = new Set<KpiDataType>(["Number", "Percentage", "Currency
  */
 type KpiMappingField = { sourceField: string; defaultValue?: string | null; };
 
-/**
- * @function calculateKpiScoreAndColor
- * @description Calcula la puntuación y el color de un KPI de tipo 'Goal/Red Flag'
- * basado en el valor actual, objetivo y umbrales.
- * @param {number | null} actualValue - El valor actual del KPI.
- * @param {number | null} targetValue - El valor objetivo del KPI.
- * @param {number | null} thresholdRed - El umbral que define el estado "Rojo".
- * @param {number | null} thresholdYellow - El umbral que define el estado "Amarillo".
- * @returns {{ score: number | null; color: (typeof kpiColorEnum.enumValues)[number] | null }}
- * Un objeto con la puntuación calculada y el color correspondiente, o null si el valor actual no es numérico.
- * @notes
- * Esta es una implementación simplificada de la lógica de puntuación. Una implementación
- * más robusta podría considerar la dirección del objetivo (mayor es mejor, menor es mejor, en rango).
- * Para este contexto, se asume "mayor o igual es mejor" para el objetivo.
- */
-export function calculateKpiScoreAndColor(
-  actualValue: number | null,
-  targetValue: number | null,
-  thresholdRed: number | null,
-  thresholdYellow: number | null
-): { score: number | null; color: (typeof kpiColorEnum.enumValues)[number] | null } {
-  if (actualValue === null || isNaN(actualValue)) {
-    return { score: null, color: null };
-  }
-
-  let score: number | null = null;
-  let color: (typeof kpiColorEnum.enumValues)[number] | null = null;
-
-  // Lógica de puntuación para Goal/Red Flag
-  if (targetValue !== null) {
-    if (actualValue >= targetValue) {
-      score = 100;
-      color = "Green";
-    } else if (thresholdYellow !== null && actualValue >= thresholdYellow) {
-      score = 50; // Ejemplo de puntuación, podría ser más granular
-      color = "Yellow";
-    } else if (thresholdRed !== null && actualValue >= thresholdRed) {
-      score = 25; // Ejemplo de puntuación
-      color = "Red";
-    } else {
-      score = 0;
-      color = "Red"; // Por debajo de todos los umbrales
-    }
-  } else if (thresholdRed !== null || thresholdYellow !== null) {
-    // Si no hay objetivo explícito, pero hay umbrales de riesgo.
-    // Asumimos que si se está por encima del umbral amarillo/rojo, es una "Advertencia" o "Rojo".
-    if (thresholdYellow !== null && actualValue >= thresholdYellow) {
-      score = 75; // Por encima de amarillo, pero sin objetivo claro
-      color = "Yellow";
-    } else if (thresholdRed !== null && actualValue >= thresholdRed) {
-      score = 50; // Por encima de rojo, pero sin objetivo claro
-      color = "Red";
-    } else if (actualValue < (thresholdRed ?? thresholdYellow ?? -Infinity)) { // Si está por debajo de cualquier umbral definido
-      score = 0;
-      color = "Red";
-    } else { // Si no cumple ningún umbral (ej. están null o no se alcanza)
-      score = null;
-      color = null;
-    }
-  } else {
-    // Si no hay target ni umbrales definidos, no se puede calcular un score/color significativo para Goal/Red Flag
-    score = null;
-    color = null;
-  }
-  
-  // Asegurar que el score no exceda 100 ni sea menor que 0
-  if (score !== null) {
-    score = Math.max(0, Math.min(100, score));
-  }
-
-  return { score, color };
-}
+// (La función calculateKpiScoreAndColor se movió a "@/lib/kpi-scoring")
 
 /* --------------------------------------------------------------------------  */
 /*                             Esquemas de Validación Zod                         */
