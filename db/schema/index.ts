@@ -4,7 +4,6 @@
  * @description Este archivo actúa como un punto de entrada centralizado para importar y exportar
  * todos los esquemas Drizzle definidos en la carpeta db/schema/.
  */
-
 export * from "./profiles-schema"
 export * from "./organizations-schema" // Exportar el esquema de organizaciones
 export * from "./scorecard-elements-schema" // Exportar el esquema de elementos del Scorecard
