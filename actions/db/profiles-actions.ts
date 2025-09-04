@@ -300,3 +300,106 @@ export async function deleteProfileAction(userId: string): Promise<ActionState<u
     return fail(`Fallo al eliminar el perfil de usuario: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/*                Backwards-compat actions expected by other modules          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * createProfileAction (compat)
+ * Firma y semántica de la v1 para no romper imports existentes.
+ */
+export async function createProfileAction(
+  data: InsertProfile
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [newProfile] = await db.insert(profilesTable).values({
+      ...data,
+      // En V2 típicamente seteamos timestamps; si la DB tiene defaults puedes omitir.
+      createdAt: (data as any)?.createdAt ?? new Date(),
+      updatedAt: (data as any)?.updatedAt ?? new Date(),
+    }).returning();
+
+    if (!newProfile) {
+      return fail("No se pudo crear el perfil.");
+    }
+    logger.info(`Profile created successfully for user: ${newProfile.userId}`);
+    return ok("Profile created successfully", newProfile);
+  } catch (error) {
+    logger.error(
+      `Error creating profile: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return fail("Failed to create profile");
+  }
+}
+
+/**
+ * updateProfileAction (compat)
+ * Actualiza por userId con patch parcial, misma firma de v1.
+ */
+export async function updateProfileAction(
+  userId: string,
+  data: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set({
+        ...data,
+        updatedAt: new Date(),
+      } as Partial<InsertProfile>)
+      .where(eq(profilesTable.userId, userId))
+      .returning();
+
+    if (!updatedProfile) {
+      return fail("Profile not found to update");
+    }
+
+    logger.info(`Profile updated successfully for user: ${userId}`);
+    return ok("Profile updated successfully", updatedProfile);
+  } catch (error) {
+    logger.error(
+      `Error updating profile: ${error instanceof Error ? error.message : String(error)}`,
+      { userId }
+    );
+    return fail("Failed to update profile");
+  }
+}
+
+/**
+ * updateProfileByStripeCustomerIdAction (compat)
+ * Actualiza por stripeCustomerId con patch parcial, misma firma de v1.
+ */
+export async function updateProfileByStripeCustomerIdAction(
+  stripeCustomerId: string,
+  data: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set({
+        ...data,
+        updatedAt: new Date(),
+      } as Partial<InsertProfile>)
+      .where(eq(profilesTable.stripeCustomerId, stripeCustomerId))
+      .returning();
+
+    if (!updatedProfile) {
+      return fail("Profile not found by Stripe customer ID");
+    }
+
+    logger.info(
+      `Profile updated by Stripe customer ID successfully: ${stripeCustomerId}`
+    );
+    return ok(
+      "Profile updated by Stripe customer ID successfully",
+      updatedProfile
+    );
+  } catch (error) {
+    logger.error(
+      `Error updating profile by stripe customer ID: ${error instanceof Error ? error.message : String(error)}`,
+      { stripeCustomerId }
+    );
+    return fail("Failed to update profile by Stripe customer ID");
+  }
+}
