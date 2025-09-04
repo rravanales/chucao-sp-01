@@ -43,6 +43,13 @@
       "when": 1756830555931,
       "tag": "0005_tired_starjammers",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1757015520592,
+      "tag": "0006_clammy_kronos",
+      "breakpoints": true
     }
   ]
 }
