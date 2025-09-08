@@ -201,6 +201,20 @@ const getKpiByIdSchema = z.object({ id: z.string().uuid("ID de KPI inválido."),
  */
 const deleteKpiSchema = z.object({ id: z.string().uuid("ID de KPI inválido."), });
 
+
+/**
+ * @schema getKpiValueForPeriodSchema
+ * @description Esquema de validación para obtener el valor de un KPI en un período específico.
+ * @property {string} kpiId - ID del KPI, UUID requerido.
+ * @property {string} periodDate - Fecha del período en formato 'YYYY-MM-DD'.
+ */
+const getKpiValueForPeriodSchema = z.object({
+  kpiId: z.string().uuid("ID de KPI inválido."),
+  periodDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Formato de fecha inválido. Usar YYYY-MM-DD."),
+});
+
 /**
  * @schema assignScorecardElementOwnersSchema
  * @description Esquema de validación para asignar o actualizar un propietario para un elemento de Scorecard.
@@ -395,6 +409,55 @@ export async function getKpiAction(id: string): Promise<ActionState<SelectKpi>> 
   } catch (error) {
     logger.error(`Error retrieving KPI: ${error instanceof Error ? error.message : String(error)}`, { id });
     return fail("Fallo al obtener el KPI.");
+  }
+}
+
+
+/**
+ * @function getKpiValueForPeriodAction
+ * @description Obtiene (si existe) el valor de un KPI para una fecha de período dada.
+ * @param {string} kpiId - ID del KPI.
+ * @param {string} periodDate - Fecha del período en formato 'YYYY-MM-DD'.
+ * @returns {Promise<ActionState<SelectKpiValue | null>>}
+ */
+export async function getKpiValueForPeriodAction(
+  kpiId: string,
+  periodDate: string,
+): Promise<ActionState<SelectKpiValue | null>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to get KPI value for period.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  const validated = getKpiValueForPeriodSchema.safeParse({ kpiId, periodDate });
+  if (!validated.success) {
+    const errorMessage = validated.error.errors.map((e) => e.message).join(", ");
+    logger.error(`Validation error for getKpiValueForPeriodAction: ${errorMessage}`);
+    return fail(errorMessage);
+  }
+
+  try {
+    const row = await firstOrUndefined(
+      db
+        .select()
+        .from(kpiValuesTable)
+        .where(
+          and(
+            eq(kpiValuesTable.kpiId, validated.data.kpiId),
+            eq(kpiValuesTable.periodDate, validated.data.periodDate),
+          ),
+        ),
+    );
+
+    // Si no existe valor para ese período, devolvemos éxito con data=null
+    return ok("Valor de KPI obtenido exitosamente.", row ?? null);
+  } catch (error) {
+    logger.error(
+      `Error retrieving KPI value for period: ${error instanceof Error ? error.message : String(error)}`,
+      { kpiId, periodDate },
+    );
+    return fail("Fallo al obtener el valor del KPI para el período.");
   }
 }
 

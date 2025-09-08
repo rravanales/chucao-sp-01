@@ -7,38 +7,29 @@
  * como la membresía y los IDs de suscripción/cliente de Stripe.
  * Las funciones aseguran la autenticación del usuario y la validación de los datos de entrada.
  */
-
 "use server";
 
 import { db } from "@/db/db";
-import {
-  InsertProfile,
-  SelectProfile,
-  groupMembersTable,
-  profilesTable,
-} from "@/db/schema";
-import { ActionState, fail, ok } from "@/types";
+import { profilesTable, SelectProfile, InsertProfile } from "@/db/schema";
+import { ActionState, ok, fail } from "@/types";
 import { auth } from "@clerk/nextjs/server";
-import { eq, inArray, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { getLogger } from "@/lib/logger";
-import { SelectGroup, groupsTable, InsertGroupMember } from "@/db/schema"; // Import groupsTable, SelectGroup, and InsertGroupMember
+import { groupMembersTable } from "@/db/schema/group-members-schema"; // Importar tabla de miembros de grupo
+import { groupsTable } from "@/db/schema/groups-schema"; // Importar tabla de grupos
+import { relations } from "drizzle-orm"; // Importar relations
 
 const logger = getLogger("profiles-actions");
 
-/**
- * Helper para obtener el primer elemento de un array o undefined.
- * @template T El tipo de los elementos en el array.
- * @param {Promise<T[]>} q La promesa que resuelve en un array de elementos.
- * @returns {Promise<T | undefined>} El primer elemento del array o undefined si el array está vacío.
- */
+// Helper para obtener el primer elemento de un array o undefined
 async function firstOrUndefined<T>(q: Promise<T[]>): Promise<T | undefined> {
   const rows = await q;
   return rows?.[0];
 }
 
 /* -------------------------------------------------------------------------- */
-/*                              Esquemas de Validación Zod                          */
+/*                               Zod Schemas                                  */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -53,26 +44,12 @@ async function firstOrUndefined<T>(q: Promise<T[]>): Promise<T | undefined> {
 const createDeltaOneUserSchema = z.object({
   userId: z.string().min(1, "El ID de usuario es requerido."),
   email: z.string().email("Formato de email inválido.").nullable().optional(),
-  name: z.string().max(255, "El nombre no puede exceder 255 caracteres.").nullable().optional(),
+  name: z
+    .string()
+    .max(255, "El nombre no puede exceder 255 caracteres.")
+    .nullable()
+    .optional(),
   groupIds: z.array(z.string().uuid("ID de grupo inválido.")).optional(),
-});
-
-/**
- * @schema getProfileByUserIdSchema
- * @description Esquema de validación para obtener un perfil por su `userId`.
- * @property {string} userId - ID del usuario, UUID requerido.
- */
-const getProfileByUserIdSchema = z.object({
-  userId: z.string().min(1, "El ID de usuario es requerido."),
-});
-
-/**
- * @schema deleteProfileSchema
- * @description Esquema de validación para la eliminación de un perfil.
- * @property {string} userId - ID del usuario, UUID requerido.
- */
-const deleteProfileSchema = z.object({
-  userId: z.string().min(1, "El ID de usuario es requerido."),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -96,18 +73,15 @@ export async function createDeltaOneUserAction(
   // Authentication check is optional here, as this action might be called by system processes (e.g., Clerk webhook, bulk import action)
   // If called directly by a user, auth should be handled by the caller action or middleware.
   const { userId: currentAuthUserId } = await auth();
-  if (!currentAuthUserId && !data.userId) { // If no current user and no userId in data, then unauthorized
+  if (!currentAuthUserId && !data.userId) {
+    // If no current user and no userId in data, then unauthorized
     logger.warn("Unauthorized attempt to create/sync DeltaOne user profile.");
-    return fail("No autorizado. Debe iniciar sesión o la acción debe ser invocada con un ID de usuario válido.");
-  }
-  
-  // Use data.userId if provided, otherwise currentAuthUserId
-  const actualUserId = data.userId || currentAuthUserId;
-  if (!actualUserId) {
-    return fail("No se pudo determinar el ID de usuario para crear/sincronizar el perfil.");
+    return fail(
+      "No autorizado. Debe iniciar sesión o la acción debe ser invocada con un ID de usuario válido.",
+    );
   }
 
-  const validatedData = createDeltaOneUserSchema.safeParse({ ...data, userId: actualUserId });
+  const validatedData = createDeltaOneUserSchema.safeParse(data);
   if (!validatedData.success) {
     const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
     logger.error(`Validation error for createDeltaOneUserAction: ${errorMessage}`);
@@ -124,89 +98,72 @@ export async function createDeltaOneUserAction(
     let profile: SelectProfile;
 
     if (existingProfile) {
-      profile = existingProfile;
-      // Update email if provided and different
-      if (email !== undefined && email !== null && profile.email !== email) {
-        const [updatedProfile] = await db.update(profilesTable)
-          .set({ email, updatedAt: new Date() })
-          .where(eq(profilesTable.userId, userId))
-          .returning();
-        profile = updatedProfile;
-        logger.info(`Profile email updated for user ${userId}.`);
-      } else if (email === null && profile.email !== null) { // If email is explicitly set to null
-        const [updatedProfile] = await db.update(profilesTable)
-          .set({ email: null, updatedAt: new Date() })
-          .where(eq(profilesTable.userId, userId))
-          .returning();
-        profile = updatedProfile;
-        logger.info(`Profile email cleared for user ${userId}.`);
+      // Si el perfil existe, actualiza los campos si son diferentes
+      const updatePayload: Partial<InsertProfile> = { updatedAt: new Date() };
+      if (email && existingProfile.email !== email) {
+        updatePayload.email = email;
       }
-      logger.info(`Profile already exists for user ${userId}.`);
+
+      // Solo actualizar si hay cambios
+      if (Object.keys(updatePayload).length > 1) {
+        const [updatedProfile] = await db
+          .update(profilesTable)
+          .set(updatePayload)
+          .where(eq(profilesTable.userId, userId))
+          .returning();
+        profile = updatedProfile;
+      } else {
+        profile = existingProfile;
+      }
+
+      logger.info(`DeltaOne user profile updated: ${userId}`);
     } else {
-      // Create new profile
+      // Si el perfil no existe, créalo
       const [newProfile] = await db
         .insert(profilesTable)
         .values({
           userId: userId,
-          email: email ?? null,
-          membership: "free", // Default membership
+          email: email,
+          // membership y stripe_customer_id/subscription_id tienen defaults o se manejan por otros flujos
           createdAt: new Date(),
           updatedAt: new Date(),
         })
         .returning();
       profile = newProfile;
-      logger.info(`Profile created for user ${userId}.`);
+      logger.info(`DeltaOne user profile created: ${userId}`);
     }
 
-    // Assign to groups if provided. This logic is simple; a more complex system might diff changes.
-    // For bulk import, it's safer to clear and re-add if groupIds are provided.
+    // Gestionar la asignación de grupos si se proporcionan groupIds
     if (groupIds && groupIds.length > 0) {
-      // Fetch current group memberships
-      const currentGroupMemberships = await db
-        .select()
-        .from(groupMembersTable)
-        .where(eq(groupMembersTable.userId, userId));
-      const currentGroupIds = new Set(currentGroupMemberships.map(gm => gm.groupId));
+      // Eliminar asignaciones existentes para este usuario y luego insertar las nuevas
+      await db.delete(groupMembersTable).where(eq(groupMembersTable.userId, userId));
 
-      const groupIdsToAdd = groupIds.filter(id => !currentGroupIds.has(id));
-      const groupIdsToRemove = [...currentGroupIds].filter(id => !groupIds.includes(id));
+      const newGroupMemberships = groupIds.map((groupId) => ({
+        groupId: groupId,
+        userId: userId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }));
 
-      // Remove groups
-      if (groupIdsToRemove.length > 0) {
-        await db
-          .delete(groupMembersTable)
-          .where(
-            and(
-              eq(groupMembersTable.userId, userId),
-              inArray(groupMembersTable.groupId, groupIdsToRemove)
-            )
-          );
-        logger.info(`User ${userId} removed from groups: ${groupIdsToRemove.join(", ")}`);
-      }
-
-      // Add new groups
-      if (groupIdsToAdd.length > 0) {
-        const newGroupMembers: InsertGroupMember[] = groupIdsToAdd.map((groupId) => ({
-          groupId: groupId,
-          userId: userId,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        }));
-        await db.insert(groupMembersTable).values(newGroupMembers);
-        logger.info(`User ${userId} added to groups: ${groupIdsToAdd.join(", ")}`);
-      }
+      await db.insert(groupMembersTable).values(newGroupMemberships);
+      logger.info(`User ${userId} assigned to groups: ${groupIds.join(", ")}`);
     }
 
     return ok("Usuario de DeltaOne registrado/actualizado exitosamente.", profile);
   } catch (error) {
     logger.error(
-      `Error creating/updating DeltaOne user profile: ${error instanceof Error ? error.message : String(error)}`,
+      `Error creating/updating DeltaOne user profile: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
       { userId, groupIds, email },
     );
-    return fail(`Fallo al registrar/actualizar el usuario de DeltaOne: ${error instanceof Error ? error.message : String(error)}`);
+    return fail(
+      `Fallo al registrar/actualizar el usuario de DeltaOne: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
-
 
 /**
  * @function getProfileByUserIdAction
@@ -220,10 +177,12 @@ export async function getProfileByUserIdAction(
   // Authentication check is optional here, as this action might be called by system processes (e.g., Clerk webhook, bulk import action)
   // Or by a user getting their OWN profile, in which case the caller ensures userId == currentAuthUserId
   const { userId: currentAuthUserId } = await auth();
-  if (!currentAuthUserId && userId === undefined) { // If no current user and no userId in data, then unauthorized
+  if (!currentAuthUserId && userId === undefined) {
+    // If no current user and no userId in data, then unauthorized
     logger.warn("Unauthorized attempt to retrieve user profile without specific ID.");
     return fail("No autorizado. Debe iniciar sesión o proporcionar un ID de usuario válido.");
   }
+
   // If a userId is passed, assume authorization logic is handled by the caller or it's a system call.
   // If no userId is passed, default to the authenticated user's ID.
   const targetUserId = userId || currentAuthUserId;
@@ -231,30 +190,38 @@ export async function getProfileByUserIdAction(
     return fail("No se pudo determinar el ID de usuario para obtener el perfil.");
   }
 
-  const validatedData = getProfileByUserIdSchema.safeParse({ userId: targetUserId });
-  if (!validatedData.success) {
-    const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
-    logger.error(`Validation error for getProfileByUserIdAction: ${errorMessage}`);
-    return fail(errorMessage);
-  }
-
   try {
-    const profile = await firstOrUndefined(
-      db.select().from(profilesTable).where(eq(profilesTable.userId, validatedData.data.userId)),
+    const profileData = await firstOrUndefined(
+      db.select().from(profilesTable).where(eq(profilesTable.userId, targetUserId)),
     );
 
-    if (!profile) {
+    if (!profileData) {
+      logger.warn(`Profile not found for user ID: ${targetUserId}`);
       return fail("Perfil de usuario no encontrado.");
     }
 
-    logger.info(`Profile retrieved successfully for user: ${profile.userId}`);
-    return ok("Perfil de usuario obtenido exitosamente.", profile);
+    // Obtener los grupos a los que pertenece el usuario
+    const userGroups = await db
+      .select({
+        id: groupsTable.id,
+        name: groupsTable.name,
+        groupType: groupsTable.groupType,
+      })
+      .from(groupsTable)
+      .innerJoin(groupMembersTable, eq(groupsTable.id, groupMembersTable.groupId))
+      .where(eq(groupMembersTable.userId, targetUserId));
+
+    return ok("Usuario de DeltaOne obtenido exitosamente.", { ...profileData, groups: userGroups });
   } catch (error) {
     logger.error(
       `Error retrieving user profile: ${error instanceof Error ? error.message : String(error)}`,
       { userId: targetUserId },
     );
-    return fail(`Fallo al obtener el perfil de usuario: ${error instanceof Error ? error.message : String(error)}`);
+    return fail(
+      `Fallo al obtener el perfil de usuario: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 
@@ -273,133 +240,51 @@ export async function deleteProfileAction(userId: string): Promise<ActionState<u
   // In a real application, implement robust authorization checks here
   // e.g., only an admin or the user themselves can delete their profile
 
-  const validatedData = deleteProfileSchema.safeParse({ userId });
-  if (!validatedData.success) {
-    const errorMessage = validatedData.error.errors.map((e) => e.message).join(", ");
-    logger.error(`Validation error for deleteProfileAction: ${errorMessage}`);
-    return fail(errorMessage);
-  }
-
   try {
     const [deletedProfile] = await db
       .delete(profilesTable)
-      .where(eq(profilesTable.userId, validatedData.data.userId))
+      .where(eq(profilesTable.userId, userId))
       .returning();
 
     if (!deletedProfile) {
-      return fail("Perfil de usuario no encontrado.");
+      return fail("Perfil de usuario no encontrado o ya eliminado.");
     }
 
-    logger.info(`Profile deleted successfully for user: ${deletedProfile.userId}`);
-    return ok("Perfil eliminado exitosamente.", undefined);
+    logger.info(`User profile deleted: ${userId}`);
+    return ok("Perfil de usuario eliminado exitosamente.");
   } catch (error) {
     logger.error(
       `Error deleting user profile: ${error instanceof Error ? error.message : String(error)}`,
       { userId },
     );
-    return fail(`Fallo al eliminar el perfil de usuario: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/*                Backwards-compat actions expected by other modules          */
-/* -------------------------------------------------------------------------- */
-
-/**
- * createProfileAction (compat)
- * Firma y semántica de la v1 para no romper imports existentes.
- */
-export async function createProfileAction(
-  data: InsertProfile
-): Promise<ActionState<SelectProfile>> {
-  try {
-    const [newProfile] = await db.insert(profilesTable).values({
-      ...data,
-      // En V2 típicamente seteamos timestamps; si la DB tiene defaults puedes omitir.
-      createdAt: (data as any)?.createdAt ?? new Date(),
-      updatedAt: (data as any)?.updatedAt ?? new Date(),
-    }).returning();
-
-    if (!newProfile) {
-      return fail("No se pudo crear el perfil.");
-    }
-    logger.info(`Profile created successfully for user: ${newProfile.userId}`);
-    return ok("Profile created successfully", newProfile);
-  } catch (error) {
-    logger.error(
-      `Error creating profile: ${error instanceof Error ? error.message : String(error)}`
+    return fail(
+      `Fallo al eliminar el perfil de usuario: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
-    return fail("Failed to create profile");
   }
 }
 
 /**
- * updateProfileAction (compat)
- * Actualiza por userId con patch parcial, misma firma de v1.
+ * @function getAllProfilesAction
+ * @description Obtiene una lista de todos los perfiles de usuario en la base de datos.
+ * Verifica la autenticación del usuario.
+ * @returns {Promise<ActionState<SelectProfile[]>>} Un objeto ActionState con la lista de perfiles o un mensaje de error.
  */
-export async function updateProfileAction(
-  userId: string,
-  data: Partial<InsertProfile>
-): Promise<ActionState<SelectProfile>> {
-  try {
-    const [updatedProfile] = await db
-      .update(profilesTable)
-      .set({
-        ...data,
-        updatedAt: new Date(),
-      } as Partial<InsertProfile>)
-      .where(eq(profilesTable.userId, userId))
-      .returning();
-
-    if (!updatedProfile) {
-      return fail("Profile not found to update");
-    }
-
-    logger.info(`Profile updated successfully for user: ${userId}`);
-    return ok("Profile updated successfully", updatedProfile);
-  } catch (error) {
-    logger.error(
-      `Error updating profile: ${error instanceof Error ? error.message : String(error)}`,
-      { userId }
-    );
-    return fail("Failed to update profile");
+export async function getAllProfilesAction(): Promise<ActionState<SelectProfile[]>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to retrieve all user profiles.");
+    return fail("No autorizado. Debe iniciar sesión.");
   }
-}
 
-/**
- * updateProfileByStripeCustomerIdAction (compat)
- * Actualiza por stripeCustomerId con patch parcial, misma firma de v1.
- */
-export async function updateProfileByStripeCustomerIdAction(
-  stripeCustomerId: string,
-  data: Partial<InsertProfile>
-): Promise<ActionState<SelectProfile>> {
   try {
-    const [updatedProfile] = await db
-      .update(profilesTable)
-      .set({
-        ...data,
-        updatedAt: new Date(),
-      } as Partial<InsertProfile>)
-      .where(eq(profilesTable.stripeCustomerId, stripeCustomerId))
-      .returning();
-
-    if (!updatedProfile) {
-      return fail("Profile not found by Stripe customer ID");
-    }
-
-    logger.info(
-      `Profile updated by Stripe customer ID successfully: ${stripeCustomerId}`
-    );
-    return ok(
-      "Profile updated by Stripe customer ID successfully",
-      updatedProfile
-    );
+    const profiles = await db.select().from(profilesTable);
+    return ok("Perfiles obtenidos exitosamente.", profiles);
   } catch (error) {
     logger.error(
-      `Error updating profile by stripe customer ID: ${error instanceof Error ? error.message : String(error)}`,
-      { stripeCustomerId }
+      `Error retrieving all user profiles: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return fail("Failed to update profile by Stripe customer ID");
+    return fail(`Fallo al obtener los perfiles de usuario: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
