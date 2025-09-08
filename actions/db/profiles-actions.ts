@@ -20,6 +20,8 @@ import { groupMembersTable } from "@/db/schema/group-members-schema"; // Importa
 import { groupsTable } from "@/db/schema/groups-schema"; // Importar tabla de grupos
 import { relations } from "drizzle-orm"; // Importar relations
 
+export type { InsertProfile, SelectProfile } from "@/db/schema"; 
+
 const logger = getLogger("profiles-actions");
 
 // Helper para obtener el primer elemento de un array o undefined
@@ -286,5 +288,150 @@ export async function getAllProfilesAction(): Promise<ActionState<SelectProfile[
       `Error retrieving all user profiles: ${error instanceof Error ? error.message : String(error)}`,
     );
     return fail(`Fallo al obtener los perfiles de usuario: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                Backwards-compat actions esperadas por otros módulos        */
+/* -------------------------------------------------------------------------- */
+
+/** @deprecated Usa createDeltaOneUserAction o getOrCreateProfileAction */
+export async function createProfileAction(
+  data: InsertProfile
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [newProfile] = await db
+      .insert(profilesTable)
+      .values({
+        ...data,
+        createdAt: (data as any)?.createdAt ?? new Date(),
+        updatedAt: (data as any)?.updatedAt ?? new Date(),
+      })
+      .returning();
+
+    if (!newProfile) return fail("No se pudo crear el perfil.");
+
+    logger.info(`Profile created successfully for user: ${newProfile.userId}`);
+    return ok("Profile created successfully", newProfile);
+  } catch (error) {
+    logger.error(
+      `Error creating profile: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return fail("Failed to create profile");
+  }
+}
+
+/** @deprecated Usada por módulos antiguos, reemplazar por flows de sincronización */
+export async function updateProfileAction(
+  userId: string,
+  data: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set({ ...data, updatedAt: new Date() } as Partial<InsertProfile>)
+      .where(eq(profilesTable.userId, userId))
+      .returning();
+
+    if (!updatedProfile) return fail("Profile not found to update");
+
+    logger.info(`Profile updated successfully for user: ${userId}`);
+    return ok("Profile updated successfully", updatedProfile);
+  } catch (error) {
+    logger.error(
+      `Error updating profile: ${error instanceof Error ? error.message : String(error)}`,
+      { userId }
+    );
+    return fail("Failed to update profile");
+  }
+}
+
+/** @deprecated Usada en stripe-actions.ts para mantener compatibilidad */
+export async function updateProfileByStripeCustomerIdAction(
+  stripeCustomerId: string,
+  data: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set({ ...data, updatedAt: new Date() } as Partial<InsertProfile>)
+      .where(eq(profilesTable.stripeCustomerId, stripeCustomerId))
+      .returning();
+
+    if (!updatedProfile) return fail("Profile not found by Stripe customer ID");
+
+    logger.info(`Profile updated by Stripe customer ID successfully: ${stripeCustomerId}`);
+    return ok("Profile updated by Stripe customer ID successfully", updatedProfile);
+  } catch (error) {
+    logger.error(
+      `Error updating profile by stripe customer ID: ${error instanceof Error ? error.message : String(error)}`,
+      { stripeCustomerId }
+    );
+    return fail("Failed to update profile by Stripe customer ID");
+  }
+}
+
+/* ----------------------- Helpers adicionales opcionales ------------------- */
+
+/** Compat getter por stripeCustomerId */
+export async function getProfileByStripeCustomerIdAction(
+  stripeCustomerId: string
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const rows = await db
+      .select()
+      .from(profilesTable)
+      .where(eq(profilesTable.stripeCustomerId, stripeCustomerId));
+    const profile = rows?.[0];
+    if (!profile) {
+      return fail("Profile not found by Stripe customer ID");
+    }
+    return ok("Profile retrieved successfully", profile);
+  } catch (error) {
+    return fail(
+      `Failed to get profile by Stripe customer ID: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
+/** Compat get-or-create usado por algunos módulos antiguos */
+export async function getOrCreateProfileAction(
+  userId: string,
+  patch?: Partial<InsertProfile>
+): Promise<ActionState<SelectProfile>> {
+  try {
+    const existing = await db
+      .select()
+      .from(profilesTable)
+      .where(eq(profilesTable.userId, userId));
+    if (existing?.[0]) {
+      if (patch && Object.keys(patch).length > 0) {
+        const [updated] = await db
+          .update(profilesTable)
+          .set({ ...patch, updatedAt: new Date() } as Partial<InsertProfile>)
+          .where(eq(profilesTable.userId, userId))
+          .returning();
+        return ok("Profile updated successfully", updated);
+      }
+      return ok("Profile retrieved successfully", existing[0]);
+    }
+    const [created] = await db
+      .insert(profilesTable)
+      .values({
+        userId,
+        ...patch,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as InsertProfile)
+      .returning();
+    return ok("Profile created successfully", created);
+  } catch (error) {
+    return fail(
+      `Failed to get or create profile: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 }
