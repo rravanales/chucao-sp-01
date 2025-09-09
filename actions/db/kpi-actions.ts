@@ -979,3 +979,44 @@ export async function enableKpiRollupAction(
     return fail("Fallo al habilitar/deshabilitar el rollup del KPI.");
   }
 }
+
+// -------------------------------------------------------------
+// NUEVA ACCIÓN: listar KPIs para selects (id + name)
+// -------------------------------------------------------------
+export type KpiSelectOption = { id: string; name: string };
+
+export async function getAllKpisForSelectAction(): Promise<ActionState<KpiSelectOption[]>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to list KPIs for select.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  try {
+    // Obtenemos KPIs y su nombre desde el elemento de scorecard asociado
+    // Asumimos que scorecardElementsTable tiene columnas: id, name, elementType
+    const rows = await db
+      .select({
+        id: kpisTable.id,
+        name: scorecardElementsTable.name,
+        elementType: scorecardElementsTable.elementType,
+      })
+      .from(kpisTable)
+      .leftJoin(
+        scorecardElementsTable,
+        eq(scorecardElementsTable.id, kpisTable.scorecardElementId),
+      );
+
+    const data: KpiSelectOption[] =
+      rows
+        .filter((r) => r.elementType === "KPI" && !!r.name)
+        .map((r) => ({ id: r.id, name: r.name as string })) ?? [];
+
+    return ok("KPIs listados exitosamente.", data);
+  } catch (error) {
+    logger.error(
+      `Error listing KPIs for select: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return fail("Fallo al listar KPIs.");
+  }
+}
