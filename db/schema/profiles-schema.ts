@@ -1,3 +1,11 @@
+/**
+ * @file db/schema/profiles-schema.ts
+ * @brief Define el esquema de base de datos para los perfiles de usuario.
+ * @description Esta tabla extiende los datos del usuario provenientes de Clerk,
+ * incorporando información sobre el nivel de membresía, detalles de suscripción a través de Stripe,
+ * y fechas relevantes de creación y actualización del perfil.
+ */
+
 import { pgTable, text, timestamp, pgEnum } from "drizzle-orm/pg-core"
 
 /**

@@ -1,0 +1,1 @@
+ALTER TYPE "public"."app_setting_type" ADD VALUE 'alert_settings';
