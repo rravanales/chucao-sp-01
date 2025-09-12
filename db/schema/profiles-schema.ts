@@ -6,7 +6,7 @@
  * y fechas relevantes de creación y actualización del perfil.
  */
 
-import { pgTable, text, timestamp, pgEnum } from "drizzle-orm/pg-core"
+import { pgTable, text, timestamp, pgEnum, boolean } from "drizzle-orm/pg-core"
 
 /**
  * @enum membershipEnum
@@ -25,6 +25,7 @@ export const profilesTable = pgTable("profiles", {
   membership: membershipEnum("membership").notNull().default("free"), // Nivel de membresía del usuario
   stripeCustomerId: text("stripe_customer_id"), // ID de cliente de Stripe para la gestión de pagos
   stripeSubscriptionId: text("stripe_subscription_id"), // ID de suscripción de Stripe
+  isActive: boolean("is_active").notNull().default(true), // Indica si el usuario está activo o desactivado
   createdAt: timestamp("created_at").defaultNow().notNull(), // Fecha de creación del perfil
   updatedAt: timestamp("updated_at")
     .defaultNow()

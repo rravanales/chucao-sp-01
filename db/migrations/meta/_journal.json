@@ -57,6 +57,13 @@
       "when": 1757621630325,
       "tag": "0007_nice_marvel_zombies",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1757705072128,
+      "tag": "0008_awesome_fenris",
+      "breakpoints": true
     }
   ]
 }

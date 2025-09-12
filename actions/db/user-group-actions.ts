@@ -6,6 +6,11 @@
  * la asignación de miembros a estos grupos, y la gestión de permisos asociados a ellos.
  * También incluye acciones para la gestión del perfil local de los usuarios (profilesTable)
  * y la integración con el sistema de autenticación de Clerk a un nivel conceptual.
+ *
+ * Corrección (UC-401):
+ * - Se modifica el "Bulk Import Users" para que el server action reciba un archivo
+ *   codificado en Base64 (CSV) y lo procese internamente, en lugar de exigir
+ *   un arreglo de usuarios ya parseado desde el cliente.
  */
 
 "use server";
@@ -21,6 +26,7 @@ import {
   groupsTable,
   userGroupTypeEnum,
   organizationsTable,
+  membershipEnum,
 } from "@/db/schema";
 import { SelectProfile, profilesTable } from "@/db/schema/profiles-schema";
 import { ActionState, fail, ok } from "@/types";
@@ -127,9 +133,15 @@ const BulkImportUserSchema = z.object({
   groupKeys: z.array(z.string().min(1, "La clave de grupo no puede estar vacía.")).optional(),
 });
 
-const BulkImportUsersPayloadSchema = z
-  .array(BulkImportUserSchema)
-  .min(1, "El archivo de importación no puede estar vacío.");
+/**
+ * CORRECCIÓN UC-401:
+ * El payload ahora es un objeto con metadatos del archivo y su contenido en Base64.
+ * El servidor se encarga de decodificar y parsear (CSV simple).
+ */
+const BulkImportUsersPayloadSchema = z.object({
+  fileName: z.string().min(1, "El nombre del archivo es requerido."),
+  fileContentBase64: z.string().min(1, "El contenido Base64 del archivo es requerido."),
+});
 
 const assignRollupTreeGroupPermissionsSchema = z.object({
   groupId: z.string().uuid("ID de grupo inválido."),
@@ -137,6 +149,23 @@ const assignRollupTreeGroupPermissionsSchema = z.object({
   permissionValue: z.boolean(),
   organizationId: z.string().uuid("ID de organización inválido."),
   applyToDescendants: z.boolean().default(false),
+});
+
+/** ------------------------------------------------------------------------ */
+/**                      MEJORA v2: Esquemas de usuario                      */
+/** ------------------------------------------------------------------------ */
+const updateUserSchema = z.object({
+  userId: z.string().min(1, "El ID de usuario es requerido."),
+  email: z.string().email("Correo electrónico inválido.").optional().nullable(),
+  membership: z
+    .enum(membershipEnum.enumValues, {
+      errorMap: () => ({ message: "Tipo de membresía inválido." }),
+    })
+    .optional(),
+});
+
+const deactivateUserSchema = z.object({
+  userId: z.string().min(1, "El ID de usuario es requerido."),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -259,7 +288,7 @@ export async function assignGroupMembersAction(
   if (!parsed.success) return fail(formatZodError(parsed.error));
   const { groupId, userIds } = parsed.data;
 
-  // Verificar grupo
+  // Verificar grupo (mantener v1)
   const [group] = await db.select().from(groupsTable).where(eq(groupsTable.id, groupId)).limit(1);
   if (!group) return fail("Grupo no encontrado.");
 
@@ -557,118 +586,374 @@ interface BulkImportResult {
   results: BulkImportUserResult[];
 }
 
+/** Parser CSV simple con soporte básico de comillas */
+function parseCsvSimple(input: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    const next = input[i + 1];
+
+    if (ch === '"' ) {
+      if (inQuotes && next === '"') {
+        // Escapar comillas dobles -> una comilla literal
+        field += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      row.push(field.trim());
+      field = "";
+    } else if ((ch === "\n" || ch === "\r") && !inQuotes) {
+      // Manejar CRLF y LF
+      if (ch === "\r" && next === "\n") {
+        i++;
+      }
+      row.push(field.trim());
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += ch;
+    }
+  }
+
+  // Último campo / fila si quedó sin cerrar
+  if (field.length > 0 || inQuotes || row.length > 0) {
+    row.push(field.trim());
+    rows.push(row);
+  }
+
+  // Filtrar filas vacías
+  return rows.filter(r => r.some(c => c && c.length > 0));
+}
+
 export async function bulkImportUsersAction(
   data: z.infer<typeof BulkImportUsersPayloadSchema>,
 ): Promise<ActionState<BulkImportResult>> {
   const { userId: current } = await auth();
   if (!current) return fail("No autorizado. Debe iniciar sesión.");
 
-  const parsed = BulkImportUsersPayloadSchema.safeParse(data);
-  if (!parsed.success) return fail(formatZodError(parsed.error));
+  const validated = BulkImportUsersPayloadSchema.safeParse(data);
+  if (!validated.success) {
+    const errorMessage = formatZodError(validated.error);
+    logger.error(`Validation error for bulkImportUsersAction: ${errorMessage}`);
+    return fail(errorMessage);
+  }
 
-  const users = parsed.data;
-  const results: BulkImportUserResult[] = [];
+  const { fileName, fileContentBase64 } = validated.data;
+
+  // Por ahora soportamos sólo CSV para parsing server-side sin librerías externas.
+  const lower = fileName.toLowerCase();
+  if (!lower.endsWith(".csv")) {
+    return fail(
+      "Formato no soportado. Por ahora, la importación masiva acepta sólo archivos CSV (se planea añadir parsing de Excel en cliente)."
+    );
+  }
+
   let createdCount = 0;
   let updatedCount = 0;
   let failedCount = 0;
+  const results: BulkImportUserResult[] = [];
 
-  // Mapa clave-de-grupo (name) -> id
-  const allGroups = await db.select().from(groupsTable);
-  const groupKeyToId = new Map(allGroups.map((g) => [g.name, g.id]));
+  try {
+    const decoded = Buffer.from(fileContentBase64, "base64").toString("utf-8");
 
-  for (const u of users) {
-    const { email, firstName, lastName, password, title, groupKeys } = u;
-    let status: BulkImportUserResult["status"] = "failed";
-    let message = "";
-    let clerkUserId: string | null = null;
+    const table = parseCsvSimple(decoded);
+    if (table.length < 2) {
+      return ok("Importación masiva de usuarios procesada, pero no se encontraron datos en el archivo.", {
+        totalProcessed: 0,
+        createdCount: 0,
+        updatedCount: 0,
+        failedCount: 0,
+        results: [],
+      });
+    }
 
-    try {
-      // 1) Buscar usuario en Clerk por email
-      const clerk = await clerkClient();
-      //const { data: users } 
-      const {data: found}  = await clerk.users.getUserList({ emailAddress: [email], limit: 1 });
+    // Encabezados
+    const headersRaw = table[0].map(h => h.trim());
+    // Normalizamos headers a un set esperado
+    const headerIndex = (name: string) => {
+      const i = headersRaw.findIndex(h => h.toLowerCase() === name.toLowerCase());
+      return i >= 0 ? i : -1;
+    };
 
-      if (found.length > 0) {
-        // Usuario existente -> actualizar
-        const existing = found[0];
-        clerkUserId = existing.id;
-        await clerk.users.updateUser(existing.id, {
-          firstName: firstName ?? undefined,
-          lastName: lastName ?? undefined,
-          password: password ?? undefined,
-          publicMetadata: { ...(title ? { title } : {}) },
+    const idxEmail = headerIndex("email");
+    if (idxEmail === -1) return fail("El CSV debe contener la columna 'email'.");
+
+    const idxFirst = headerIndex("firstName");
+    const idxLast = headerIndex("lastName");
+    const idxPassword = headerIndex("password");
+    const idxTitle = headerIndex("title");
+    const idxGroupKeys = headerIndex("groupKeys"); // Separadas por ';'
+
+    // Mapa clave-de-grupo (name) -> id
+    const allGroups = await db.select().from(groupsTable);
+    const groupKeyToId = new Map(allGroups.map((g) => [g.name, g.id]));
+
+    // Recorremos filas de datos
+    const dataRows = table.slice(1);
+    const usersToProcess: Array<z.infer<typeof BulkImportUserSchema>> = [];
+
+    for (const r of dataRows) {
+      const email = r[idxEmail]?.trim();
+      const firstName = idxFirst >= 0 ? r[idxFirst]?.trim() : undefined;
+      const lastName = idxLast >= 0 ? r[idxLast]?.trim() : undefined;
+      const password = idxPassword >= 0 ? r[idxPassword]?.trim() : undefined;
+      const title = idxTitle >= 0 ? r[idxTitle]?.trim() : undefined;
+      const groupKeysStr = idxGroupKeys >= 0 ? r[idxGroupKeys]?.trim() : undefined;
+
+      const groupKeys =
+        groupKeysStr && groupKeysStr.length > 0
+          ? groupKeysStr.split(";").map((g) => g.trim()).filter(Boolean)
+          : undefined;
+
+      const candidate = {
+        email,
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
+        password: password || undefined,
+        title: title || undefined,
+        groupKeys,
+      };
+
+      const checked = BulkImportUserSchema.safeParse(candidate);
+      if (!checked.success) {
+        failedCount++;
+        results.push({
+          email: email || "N/A",
+          status: "failed",
+          message: formatZodError(checked.error),
         });
-        status = "updated";
-        message = `Usuario Clerk actualizado: ${existing.id}`;
-      } else {
-        // Usuario nuevo -> crear
-        const generatedPassword = password ?? crypto.randomBytes(16).toString("hex");
-        const created = await clerk.users.createUser({
-          emailAddress: [email],
-          firstName: firstName ?? undefined,
-          lastName: lastName ?? undefined,
-          password: generatedPassword,
-          publicMetadata: { ...(title ? { title } : {}) },
-        });
-        clerkUserId = created.id;
-        status = "created";
-        message = `Usuario Clerk creado: ${created.id}`;
+        continue;
       }
 
-      // 2) Crear/Actualizar perfil en DeltaOne
-      if (clerkUserId) {
-        const profileResult = await createDeltaOneUserAction({
-          userId: clerkUserId,
-          email,
-        });
+      usersToProcess.push(checked.data);
+    }
 
-        if (!profileResult.isSuccess) {
-          message += ` | Error perfil DeltaOne: ${profileResult.message}`;
-          status = "failed";
+    // Proceso: para cada usuario, mantener la lógica original con Clerk + perfil local
+    for (const u of usersToProcess) {
+      const { email, firstName, lastName, password, title, groupKeys } = u;
+      let status: BulkImportUserResult["status"] = "failed";
+      let message = "";
+      let clerkUserId: string | null = null;
+
+      try {
+        // 1) Buscar/crear/actualizar en Clerk
+        // Nota: mantener el patrón original (clerkClient() como posible factory del SDK).
+        const clerk = await clerkClient();
+        const { data: found } = await clerk.users.getUserList({ emailAddress: [email], limit: 1 });
+
+        if (found.length > 0) {
+          // Usuario existente -> actualizar
+          const existing = found[0];
+          clerkUserId = existing.id;
+          await clerk.users.updateUser(existing.id, {
+            firstName: firstName ?? undefined,
+            lastName: lastName ?? undefined,
+            password: password ?? undefined,
+            publicMetadata: { ...(title ? { title } : {}) },
+          });
+          status = "updated";
+          message = `Usuario Clerk actualizado: ${existing.id}`;
         } else {
-          // 3) Asignación de grupos (sobrescribir membresías)
-          const groupIdsToAssign: string[] = [];
-          if (groupKeys && groupKeys.length > 0) {
-            for (const key of groupKeys) {
-              const gid = groupKeyToId.get(key);
-              if (gid) groupIdsToAssign.push(gid);
-              else logger.warn(`Group key '${key}' no encontrado para ${email}.`);
+          // Usuario nuevo -> crear
+          const generatedPassword = password ?? crypto.randomBytes(16).toString("hex");
+          const created = await clerk.users.createUser({
+            emailAddress: [email],
+            firstName: firstName ?? undefined,
+            lastName: lastName ?? undefined,
+            password: generatedPassword,
+            publicMetadata: { ...(title ? { title } : {}) },
+          });
+          clerkUserId = created.id;
+          status = "created";
+          message = `Usuario Clerk creado: ${created.id}`;
+        }
+
+        // 2) Crear/Actualizar perfil en DeltaOne
+        if (clerkUserId) {
+          const profileResult = await createDeltaOneUserAction({
+            userId: clerkUserId,
+            email,
+          });
+
+          if (!profileResult.isSuccess) {
+            message += ` | Error perfil DeltaOne: ${profileResult.message}`;
+            status = "failed";
+          } else {
+            // 3) Asignación de grupos (sobrescribir membresías)
+            const groupIdsToAssign: string[] = [];
+            if (groupKeys && groupKeys.length > 0) {
+              for (const key of groupKeys) {
+                const gid = groupKeyToId.get(key);
+                if (gid) groupIdsToAssign.push(gid);
+                else logger.warn(`Group key '${key}' no encontrado para ${email}.`);
+              }
+            }
+
+            await db
+              .delete(groupMembersTable)
+              .where(eq(groupMembersTable.userId, clerkUserId));
+
+            if (groupIdsToAssign.length > 0) {
+              const rows: InsertGroupMember[] = groupIdsToAssign.map((gid) => ({
+                groupId: gid,
+                userId: clerkUserId!,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              }));
+              await db.insert(groupMembersTable).values(rows);
+              message += " | Grupos asignados.";
             }
           }
-
-          await db
-            .delete(groupMembersTable)
-            .where(eq(groupMembersTable.userId, clerkUserId));
-
-          if (groupIdsToAssign.length > 0) {
-            const rows: InsertGroupMember[] = groupIdsToAssign.map((gid) => ({
-              groupId: gid,
-              userId: clerkUserId!,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            }));
-            await db.insert(groupMembersTable).values(rows);
-            message += " | Grupos asignados.";
-          }
         }
+      } catch (err: any) {
+        logger.error(`Error procesando usuario ${email}: ${err?.message ?? String(err)}`, { user: u });
+        message = `Error: ${err?.message ?? String(err)}`;
+        status = "failed";
+      } finally {
+        results.push({ email, status, message });
+        if (status === "created") createdCount++;
+        else if (status === "updated") updatedCount++;
+        else failedCount++;
       }
-    } catch (err: any) {
-      logger.error(`Error procesando usuario ${email}: ${err?.message ?? String(err)}`, { user: u });
-      message = `Error: ${err?.message ?? String(err)}`;
-      status = "failed";
-    } finally {
-      results.push({ email, status, message });
-      if (status === "created") createdCount++;
-      else if (status === "updated") updatedCount++;
-      else failedCount++;
     }
+
+    return ok("Importación masiva de usuarios procesada.", {
+      totalProcessed: usersToProcess.length,
+      createdCount,
+      updatedCount,
+      failedCount,
+      results,
+    });
+  } catch (e: any) {
+    logger.error(
+      `Error processing bulk import file: ${e?.message ?? String(e)}`,
+      { fileName }
+    );
+    return fail(
+      `Fallo al procesar el archivo de importación masiva: ${e?.message ?? String(e)}`
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                       MEJORAS v2: Acciones de usuario extra                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @function updateUserAction
+ * @description Actualiza el perfil de un usuario existente en la base de datos local (UC-400).
+ * Permite a un administrador modificar ciertos detalles del perfil de usuario en DeltaOne.
+ * @param {z.infer<typeof updateUserSchema>} data - Datos del perfil de usuario a actualizar.
+ * @returns {Promise<ActionState<SelectProfile>>} Objeto ActionState con el perfil actualizado o un mensaje de error.
+ * @notes No reemplaza a updateDeltaOneUserAction (v1). Es una acción adicional más focalizada
+ *        en email/membership y mantiene compatibilidad con el resto del contrato público.
+ */
+export async function updateUserAction(
+  data: z.infer<typeof updateUserSchema>,
+): Promise<ActionState<SelectProfile>> {
+  const { userId: currentAuthUserId } = await auth();
+  if (!currentAuthUserId) {
+    logger.warn("Unauthorized attempt to update user profile.");
+    return fail("No autorizado. Debe iniciar sesión.");
   }
 
-  return ok("Importación masiva de usuarios procesada.", {
-    totalProcessed: users.length,
-    createdCount,
-    updatedCount,
-    failedCount,
-    results,
-  });
+  const validated = updateUserSchema.safeParse(data);
+  if (!validated.success) {
+    return fail(formatZodError(validated.error));
+  }
+
+  const { userId, email, membership } = validated.data;
+
+  // Verificar existencia del perfil
+  const [existing] = await db
+    .select()
+    .from(profilesTable)
+    .where(eq(profilesTable.userId, userId))
+    .limit(1);
+
+  if (!existing) {
+    return fail("Perfil de usuario no encontrado.");
+  }
+
+  try {
+    const [updatedProfile] = await db
+      .update(profilesTable)
+      .set({
+        ...(email !== undefined && { email: email ?? null }),
+        ...(membership !== undefined && { membership }),
+        updatedAt: new Date(),
+      })
+      .where(eq(profilesTable.userId, userId))
+      .returning();
+
+    if (!updatedProfile) {
+      return fail("Perfil de usuario no encontrado.");
+    }
+
+    logger.info(`User profile updated: ${userId}`);
+    return ok("Perfil de usuario actualizado exitosamente.", updatedProfile);
+  } catch (e: any) {
+    logger.error(`Error updating user profile: ${e?.message ?? String(e)}`, { userId });
+    return fail("Fallo al actualizar el perfil de usuario.");
+  }
+}
+
+/**
+ * @function deactivateUserAction
+ * @description Desactiva un usuario en el sistema (UC-400), implementación provisional:
+ * - Elimina al usuario de todos los grupos.
+ * - Establece su membresía a 'free' como marcador de desactivación.
+ * @param {z.infer<typeof deactivateUserSchema>} data
+ * @returns {Promise<ActionState<undefined>>}
+ * @notes Mantiene compatibilidad: no reemplaza a deactivateDeltaOneUserAction (v1).
+ */
+export async function deactivateUserAction(
+  data: z.infer<typeof deactivateUserSchema>,
+): Promise<ActionState<undefined>> {
+  const { userId: currentAuthUserId } = await auth();
+  if (!currentAuthUserId) {
+    logger.warn("Unauthorized attempt to deactivate user.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  const validated = deactivateUserSchema.safeParse(data);
+  if (!validated.success) {
+    return fail(formatZodError(validated.error));
+  }
+
+  const { userId } = validated.data;
+
+  // Verificar existencia del perfil
+  const [existing] = await db
+    .select()
+    .from(profilesTable)
+    .where(eq(profilesTable.userId, userId))
+    .limit(1);
+
+  if (!existing) {
+    return fail("Perfil de usuario no encontrado.");
+  }
+
+  try {
+    await db.transaction(async (tx) => {
+      await tx.delete(groupMembersTable).where(eq(groupMembersTable.userId, userId));
+      await tx
+        .update(profilesTable)
+        .set({ membership: "free", updatedAt: new Date() })
+        .where(eq(profilesTable.userId, userId));
+    });
+
+    logger.info(`User ${userId} deactivated (placeholder).`);
+    return ok("Usuario desactivado exitosamente (implementación provisional).", undefined);
+  } catch (e: any) {
+    logger.error(`Error deactivating user: ${e?.message ?? String(e)}`, { userId });
+    return fail("Fallo al desactivar el usuario.");
+  }
 }
