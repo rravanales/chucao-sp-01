@@ -39,7 +39,6 @@ import {
 import {
   MoreVertical,
   Edit,
-  Trash2,
   UserRoundX, // Icono para desactivar usuario
   UploadCloud, // Icono para importación masiva
   Loader2,
@@ -52,8 +51,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
-  DialogClose
+  DialogTrigger
 } from "@/components/ui/dialog"
 import {
   AlertDialog,
@@ -275,14 +273,26 @@ const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
         return
       }
 
-      // Leer el contenido del archivo como Base64
       const reader = new FileReader()
-      reader.readAsDataURL(file) // Lee como data URL (Base64)
+      reader.readAsDataURL(file)
 
       reader.onload = async event => {
         const base64Content = event.target?.result as string
-        // La parte inicial "data:text/csv;base64," debe ser eliminada
-        const cleanBase64 = base64Content.split(",")
+
+        // Corregido: solo la parte base64, no array
+        const cleanBase64 = base64Content.includes(",")
+          ? base64Content.split(",")[1]
+          : base64Content
+
+        if (!cleanBase64) {
+          toast({
+            title: "Error",
+            description: "No se pudo leer el contenido Base64 del archivo.",
+            variant: "destructive"
+          })
+          setIsSubmitting(false)
+          return
+        }
 
         const result = await bulkImportUsersAction({
           fileName: file.name,
@@ -295,7 +305,7 @@ const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
             description: `Importación masiva completada: ${result.data?.createdCount} creados, ${result.data?.updatedCount} actualizados, ${result.data?.failedCount} fallidos.`
           })
           onSuccess()
-          onClose() // Cerrar el diálogo al éxito
+          onClose()
         } else {
           toast({
             title: "Error",
@@ -332,12 +342,12 @@ const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
           name="file"
           render={({ field: { value, onChange, ...fieldProps } }) => (
             <FormItem>
-              <FormLabel>Archivo CSV/Excel de Usuarios</FormLabel>
+              <FormLabel>Archivo CSV de Usuarios</FormLabel>
               <FormControl>
                 <Input
                   {...fieldProps}
                   type="file"
-                  accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
+                  accept=".csv,text/csv"
                   onChange={event => {
                     onChange(event.target.files)
                   }}
@@ -345,9 +355,10 @@ const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
                 />
               </FormControl>
               <FormDescription>
-                Sube un archivo CSV o Excel con la lista de usuarios. Se espera
-                un formato con columnas como `email`, `firstName`, `lastName` y
-                opcionalmente `groupKeys` (separados por `;`).
+                Sube un archivo CSV con la lista de usuarios. Se espera un
+                formato con columnas como <code>email</code>,{" "}
+                <code>firstName</code>, <code>lastName</code> y opcionalmente{" "}
+                <code>groupKeys</code> (separados por <code>;</code>).
               </FormDescription>
               <FormMessage />
             </FormItem>
@@ -386,15 +397,10 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
   }, [initialProfiles])
 
   const getUserGroups = (userId: string) => {
-    // Esto es un placeholder. Idealmente, los perfiles vendrían pre-cargados con sus grupos
-    // o habría una acción específica para obtener los grupos de un usuario.
-    // Por simplicidad, aquí solo mostramos los nombres de todos los grupos.
     return initialGroups.map(group => group.name).join(", ")
   }
 
   const handleDeleteUser = async (userId: string) => {
-    // La acción de desactivar se ha renombrado de delete a deactivate para este UC.
-    // Si se quisiera una eliminación completa, se usaría deleteProfileAction de profiles-actions.
     const result = await deactivateUserAction({ userId })
     if (result.isSuccess) {
       toast({ title: "Éxito", description: "Usuario desactivado." })
@@ -425,8 +431,8 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
             <DialogHeader>
               <DialogTitle>Importar Usuarios Masivamente</DialogTitle>
               <DialogDescription>
-                Sube un archivo CSV o Excel para crear o actualizar múltiples
-                cuentas de usuario.
+                Sube un archivo CSV para crear o actualizar múltiples cuentas de
+                usuario.
               </DialogDescription>
             </DialogHeader>
             <BulkImportUsersForm
@@ -435,10 +441,6 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
             />
           </DialogContent>
         </Dialog>
-        {/* Aquí se podría añadir un botón para crear usuario individual, pero Clerk ya maneja la creación de base */}
-        {/* <Button>
-          <PlusCircle className="mr-2 size-4" /> Nuevo Usuario
-        </Button> */}
       </div>
 
       {profiles.length === 0 ? (
@@ -465,7 +467,6 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
                 <TableCell>{user.email}</TableCell>
                 <TableCell>{user.membership}</TableCell>
                 <TableCell>
-                  {/* Esto es un placeholder, ya que getUserGroups es una simplificación */}
                   <Users className="mr-1 inline-block size-3" />{" "}
                   {getUserGroups(user.userId)}
                 </TableCell>
