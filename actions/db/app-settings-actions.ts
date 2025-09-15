@@ -1,12 +1,16 @@
 /**
  * @file actions/db/app-settings-actions.ts
- * @brief Implementa Server Actions para la gestión de la configuración de la aplicación en DeltaOne.
- * @description Este archivo contiene funciones del lado del servidor para obtener y actualizar
- * configuraciones globales de la aplicación, como la personalización de la terminología
- * y la activación/desactivación de funcionalidades como los Strategy Maps y configuraciones
- * de alertas globales.
- * Asegura la validación de datos, el almacenamiento consistente en la base de datos
- * y la protección de accesos no autorizados.
+ * @brief Server Actions para la gestión de configuración de la aplicación en DeltaOne.
+ * @description Funciones del lado del servidor para obtener y actualizar configuraciones globales:
+ * - Personalización de terminología (UC-403)
+ * - Activación/desactivación de Strategy Maps (UC-404)
+ * - Configuración global de alertas por respuesta a notas (UC-302)
+ *
+ * Mejores prácticas aplicadas:
+ * - Validación con Zod y mensajes de error claros
+ * - Compatibilidad hacia atrás en contratos de entrada
+ * - Escritura dual para claves renombradas a fin de no romper lecturas existentes
+ * - Respuestas tipadas coherentes con `.returning()`
  */
 
 "use server";
@@ -41,14 +45,25 @@ const getAppSettingSchema = z.object({
 });
 
 /**
- * @schema updateTerminologySettingSchema
- * @description Esquema de validación para actualizar una configuración de terminología.
- * @property {string} settingKey - La clave del término a actualizar, requerida.
- * @property {string} settingValue - El nuevo valor del término, requerido.
+ * @schema updateTerminologySettingSchemaV1
+ * @description Esquema v1 para actualizar terminología.
+ * @property {string} settingKey
+ * @property {string} settingValue
  */
-const updateTerminologySettingSchema = z.object({
-  settingKey: z.string().min(1, "La clave de la configuración es requerida."),
-  settingValue: z.string().min(1, "El valor de la configuración es requerido."),
+const updateTerminologySettingSchemaV1 = z.object({
+  settingKey: z.string().min(1, "La clave de la configuración es requerida.").max(255),
+  settingValue: z.string().min(1, "El valor de la configuración es requerido.").max(255),
+});
+
+/**
+ * @schema updateTerminologySettingSchemaV2
+ * @description Esquema v2 para actualizar terminología.
+ * @property {string} key
+ * @property {string} value
+ */
+const updateTerminologySettingSchemaV2 = z.object({
+  key: z.string().min(1, "La clave es requerida.").max(255),
+  value: z.string().min(1, "El valor es requerido.").max(255),
 });
 
 /**
@@ -68,6 +83,31 @@ const toggleStrategyMapsSchema = z.object({
 const toggleEnableNoteReplyAlertsSchema = z.object({
   enabled: z.boolean(),
 });
+
+/* -------------------------------------------------------------------------- */
+/*                           Utilidades de Compatibilidad                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Normaliza la entrada de terminología para aceptar los contratos v1 y v2.
+ * Retorna `{ settingKey, settingValue }` ya normalizado.
+ */
+function normalizeTerminologyInput(
+  data: unknown,
+): z.infer<typeof updateTerminologySettingSchemaV1> | null {
+  const v2 = updateTerminologySettingSchemaV2.safeParse(data);
+  if (v2.success) {
+    return {
+      settingKey: v2.data.key,
+      settingValue: v2.data.value,
+    };
+  }
+  const v1 = updateTerminologySettingSchemaV1.safeParse(data);
+  if (v1.success) {
+    return v1.data;
+  }
+  return null;
+}
 
 /* -------------------------------------------------------------------------- */
 /*                                 Server Actions                             */
@@ -124,11 +164,13 @@ export async function getAppSettingAction(
 /**
  * @function updateTerminologyAction
  * @description Actualiza una configuración de terminología (UC-403).
- * @param {z.infer<typeof updateTerminologySettingSchema>} data
+ * Acepta ambos contratos de entrada:
+ *  - v1: { settingKey, settingValue }
+ *  - v2: { key, value }
  * @returns {Promise<ActionState<SelectAppSetting>>}
  */
 export async function updateTerminologyAction(
-  data: z.infer<typeof updateTerminologySettingSchema>,
+  data: unknown,
 ): Promise<ActionState<SelectAppSetting>> {
   const { userId } = await auth();
   if (!userId) {
@@ -136,14 +178,22 @@ export async function updateTerminologyAction(
     return fail("No autorizado. Debe iniciar sesión.");
   }
 
-  const validatedData = updateTerminologySettingSchema.safeParse(data);
-  if (!validatedData.success) {
-    const errorMessage = formatZodError(validatedData.error);
+  const normalized = normalizeTerminologyInput(data);
+  if (!normalized) {
+    // Construimos el detalle de error usando ambos esquemas para claridad
+    const v1 = updateTerminologySettingSchemaV1.safeParse(data);
+    const v2 = updateTerminologySettingSchemaV2.safeParse(data);
+    const errorMessage = [
+      !v2.success ? `v2: ${formatZodError(v2.error)}` : "",
+      !v1.success ? `v1: ${formatZodError(v1.error)}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
     logger.error(`Validation error for updateTerminologyAction: ${errorMessage}`);
-    return fail(errorMessage);
+    return fail(errorMessage || "Datos inválidos.");
   }
 
-  const { settingKey, settingValue } = validatedData.data;
+  const { settingKey, settingValue } = normalized;
 
   try {
     const [updatedSetting] = await db
@@ -186,6 +236,10 @@ export async function updateTerminologyAction(
 /**
  * @function toggleStrategyMapsAction
  * @description Activa o desactiva "Strategy Maps" (UC-404).
+ * Compatibilidad:
+ *  - Clave canónica (v1): "strategy_maps_enabled"
+ *  - Clave alternativa (v2): "enable_strategy_maps"
+ * Se hace escritura dual para no romper lecturas previas.
  * @param {z.infer<typeof toggleStrategyMapsSchema>} data
  * @returns {Promise<ActionState<SelectAppSetting>>}
  */
@@ -206,14 +260,16 @@ export async function toggleStrategyMapsAction(
   }
 
   const { enabled } = validatedData.data;
-  const settingKey = "strategy_maps_enabled";
+  const canonicalKey = "strategy_maps_enabled"; // v1
+  const altKey = "enable_strategy_maps"; // v2 (compatibilidad)
   const settingValue = String(enabled);
 
   try {
-    const [updatedSetting] = await db
+    // Escribimos primero la clave canónica y usamos ese resultado como retorno
+    const [canonicalSetting] = await db
       .insert(appSettingsTable)
       .values({
-        settingKey,
+        settingKey: canonicalKey,
         settingValue,
         settingType: "methodology",
         updatedAt: new Date(),
@@ -227,19 +283,47 @@ export async function toggleStrategyMapsAction(
       })
       .returning();
 
-    if (!updatedSetting) {
+    // Escritura secundaria (best-effort) para compatibilidad con la clave alternativa
+    try {
+      await db
+        .insert(appSettingsTable)
+        .values({
+          settingKey: altKey,
+          settingValue,
+          settingType: "methodology",
+          updatedAt: new Date(),
+        } satisfies InsertAppSetting)
+        .onConflictDoUpdate({
+          target: appSettingsTable.settingKey,
+          set: {
+            settingValue,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+    } catch (compatError) {
+      // No rompemos el flujo si la compat falla; log de advertencia suficiente.
+      logger.warn(
+        `Secondary write for alt Strategy Maps key failed: ${
+          compatError instanceof Error ? compatError.message : String(compatError)
+        }`,
+        { altKey, settingValue },
+      );
+    }
+
+    if (!canonicalSetting) {
       return fail("Fallo al actualizar la configuración de Strategy Maps.");
     }
 
     logger.info(
       `Strategy Maps setting toggled to ${enabled} by user ${userId}`,
-      { updatedSetting },
+      { canonicalSetting },
     );
-    return ok("Configuración de Strategy Maps actualizada exitosamente.", updatedSetting);
+    return ok("Configuración de Strategy Maps actualizada exitosamente.", canonicalSetting);
   } catch (error) {
     logger.error(
       `Error toggling Strategy Maps setting: ${error instanceof Error ? error.message : String(error)}`,
-      { settingKey, settingValue },
+      { canonicalKey, settingValue },
     );
     return fail(
       `Fallo al actualizar la configuración de Strategy Maps: ${error instanceof Error ? error.message : String(error)}`,
