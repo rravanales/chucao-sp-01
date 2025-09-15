@@ -11,6 +11,10 @@
  * - Se modifica el "Bulk Import Users" para que el server action reciba un archivo
  *   codificado en Base64 (CSV) y lo procese internamente, en lugar de exigir
  *   un arreglo de usuarios ya parseado desde el cliente.
+ *
+ * Nuevas funcionalidades (UC-503, Paso 6.2.1):
+ * - Implementación de `getUserPermissionsAction` para obtener todos los permisos de un usuario.
+ * - `assignRollupTreeGroupPermissionsAction` ya implementada con soporte de descendientes.
  */
 
 "use server";
@@ -21,6 +25,7 @@ import {
   InsertGroupMember,
   InsertGroupPermission,
   SelectGroup,
+  SelectGroupPermission, // <-- requerido para getUserPermissionsAction
   groupMembersTable,
   groupPermissionsTable,
   groupsTable,
@@ -955,5 +960,59 @@ export async function deactivateUserAction(
   } catch (e: any) {
     logger.error(`Error deactivating user: ${e?.message ?? String(e)}`, { userId });
     return fail("Fallo al desactivar el usuario.");
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                       MEJORA v2: getUserPermissionsAction                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @function getUserPermissionsAction
+ * @description Obtiene todos los permisos (globales y específicos de organización)
+ * concedidos (permissionValue = true) al usuario autenticado a través de sus grupos.
+ * @returns {Promise<ActionState<SelectGroupPermission[]>>}
+ */
+export async function getUserPermissionsAction(): Promise<ActionState<SelectGroupPermission[]>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to retrieve user permissions.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  try {
+    // 1) Grupos del usuario
+    const memberships = await db
+      .select({ groupId: groupMembersTable.groupId })
+      .from(groupMembersTable)
+      .where(eq(groupMembersTable.userId, userId));
+
+    const groupIds = memberships.map((m) => m.groupId);
+    if (groupIds.length === 0) {
+      return ok("No se encontraron permisos: el usuario no pertenece a ningún grupo.", []);
+    }
+
+    // 2) Permisos concedidos (true) de esos grupos (globales y por organización)
+    const permissions = await db
+      .select()
+      .from(groupPermissionsTable)
+      .where(
+        and(
+          inArray(groupPermissionsTable.groupId, groupIds),
+          eq(groupPermissionsTable.permissionValue, true),
+        ),
+      );
+
+    logger.info(`Permissions retrieved for user ${userId}`, {
+      userId,
+      permissionsCount: permissions.length,
+    });
+
+    return ok("Permisos de usuario obtenidos exitosamente.", permissions);
+  } catch (error: any) {
+    logger.error(`Error retrieving user permissions: ${error?.message ?? String(error)}`, {
+      userId,
+    });
+    return fail("Fallo al obtener los permisos del usuario.");
   }
 }
