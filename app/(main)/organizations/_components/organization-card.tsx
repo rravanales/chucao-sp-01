@@ -1,10 +1,11 @@
 /**
  * @file app/(main)/organizations/_components/organization-card.tsx
- * @brief Componente de cliente para mostrar los detalles de una organización y permitir acciones de edición/eliminación.
- * @description Este componente interactivo recibe los datos de una organización y los presenta
- * en una tarjeta. Incluye funcionalidades para editar la organización a través de un modal
- * (`OrganizationForm`) y eliminarla con una confirmación (`AlertDialog`), utilizando
- * Server Actions para las operaciones de backend y `useToast` para feedback al usuario (UC-500).
+ * @brief Componente de cliente para mostrar una tarjeta de organización y sus sub-organizaciones.
+ * @description Este componente muestra los detalles de una organización, incluyendo sus hijos
+ * de forma recursiva. Permite la edición y eliminación de organizaciones, utilizando
+ * Server Actions para las operaciones CRUD y shadcn/ui para la interfaz.
+ * (UC-500: Gestionar Jerarquía de Organizaciones)
+ * Incluye verificaciones de permisos para controlar la visibilidad de las acciones.
  */
 "use client"
 
@@ -44,126 +45,150 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger
 } from "@/components/ui/alert-dialog"
-import OrganizationForm from "./organization-form"
+import OrganizationForm from "./organization-form" // Assuming this is for editing
 import { deleteOrganizationAction } from "@/actions/db/organization-actions"
 import { useToast } from "@/components/ui/use-toast"
 import { useRouter } from "next/navigation"
+import { usePermissions } from "@/context/permission-context" // Import usePermissions
 
 interface OrganizationCardProps {
-  organization: SelectOrganization
+  organization: SelectOrganization & { children?: SelectOrganization[] }
+  level?: number // Para la indentación recursiva
 }
 
-export default function OrganizationCard({
-  organization
-}: OrganizationCardProps) {
-  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
+const OrganizationCard: React.FC<OrganizationCardProps> = ({
+  organization,
+  level = 0
+}) => {
   const { toast } = useToast()
   const router = useRouter()
+  const { hasPermission } = usePermissions() // Access hasPermission from context
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
 
-  /**
-   * @function handleDelete
-   * @description Maneja la lógica de eliminación de una organización.
-   * Invoca la Server Action `deleteOrganizationAction` y muestra notificaciones.
-   * @param {string} organizationId - El ID de la organización a eliminar.
-   * @returns {Promise<void>}
-   */
-  const handleDelete = async (organizationId: string) => {
-    const result = await deleteOrganizationAction({ id: organizationId })
+  // Check if the current user can manage this specific organization (edit/delete)
+  const canManageOrganization = hasPermission(
+    "organization_management",
+    organization.id
+  )
+
+  const handleDeleteOrganization = async () => {
+    const result = await deleteOrganizationAction({ id: organization.id })
     if (result.isSuccess) {
       toast({
-        title: "Organización eliminada",
-        description: `La organización "${organization.name}" ha sido eliminada exitosamente.`
+        title: "Éxito",
+        description: "Organización eliminada correctamente."
       })
-      router.refresh() // Revalidar los datos en el servidor para actualizar la lista
+      router.refresh()
     } else {
       toast({
-        title: "Error al eliminar",
-        description: result.message || "No se pudo eliminar la organización.",
+        title: "Error",
+        description: result.message || "Fallo al eliminar la organización.",
         variant: "destructive"
       })
     }
   }
 
   return (
-    <Card className="relative transition-shadow duration-200 hover:shadow-lg">
+    <Card
+      className="mb-4"
+      style={{ marginLeft: `${level * 20}px` }} // Indent based on level
+    >
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="flex items-center gap-2 text-xl">
-          <Building2 className="text-muted-foreground size-5" />
-          {organization.name}
-        </CardTitle>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="size-8 p-0">
-              <span className="sr-only">Abrir menú</span>
-              <MoreVertical className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-              <DialogTrigger asChild>
-                <DropdownMenuItem
-                  onSelect={e => e.preventDefault()} // Prevenir que el DropdownMenu se cierre
-                >
-                  <Edit className="mr-2 size-4" />
-                  Editar
-                </DropdownMenuItem>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-[425px]">
-                <DialogHeader>
-                  <DialogTitle>Editar Organización</DialogTitle>
-                  <DialogDescription>
-                    Modifica los detalles de la organización.
-                  </DialogDescription>
-                </DialogHeader>
-                <OrganizationForm
-                  organization={organization}
-                  onSuccess={() => setIsEditDialogOpen(false)}
-                />
-              </DialogContent>
-            </Dialog>
-
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <DropdownMenuItem
-                  className="text-red-600"
-                  onSelect={e => e.preventDefault()} // Prevenir que el DropdownMenu se cierre
-                >
-                  <Trash2 className="mr-2 size-4" />
-                  Eliminar
-                </DropdownMenuItem>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    ¿Estás absolutamente seguro?
-                  </AlertDialogTitle>
-                  <AlertDialogDescription>
-                    Esta acción no se puede deshacer. Esto eliminará
-                    permanentemente la organización{" "}
-                    <span className="font-semibold">{organization.name}</span> y
-                    todos sus elementos del Scorecard, KPIs y datos asociados.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => handleDelete(organization.id)}
-                    className="bg-red-600 hover:bg-red-700"
+        <div className="flex items-center gap-2">
+          <Building2 className="text-primary size-5" />
+          <CardTitle className="text-xl font-bold">
+            {organization.name}
+          </CardTitle>
+        </div>
+        {canManageOrganization && ( // Only show dropdown if user has permission
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" className="size-8 p-0">
+                <span className="sr-only">Abrir menú</span>
+                <MoreVertical className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <Dialog
+                open={isEditDialogOpen}
+                onOpenChange={setIsEditDialogOpen}
+              >
+                <DialogTrigger asChild>
+                  <DropdownMenuItem onSelect={e => e.preventDefault()}>
+                    <Edit className="mr-2 size-4" /> Editar
+                  </DropdownMenuItem>
+                </DialogTrigger>
+                <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]">
+                  <DialogHeader>
+                    <DialogTitle>Editar Organización</DialogTitle>
+                    <DialogDescription>
+                      Modifica los detalles de esta organización.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <OrganizationForm
+                    organization={organization}
+                    onSuccess={() => {
+                      setIsEditDialogOpen(false) // Close dialog on success
+                      router.refresh() // Revalidate data
+                    }}
+                  />
+                </DialogContent>
+              </Dialog>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <DropdownMenuItem
+                    onSelect={e => e.preventDefault()}
+                    className="text-red-600"
                   >
-                    Eliminar
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </DropdownMenuContent>
-        </DropdownMenu>
+                    <Trash2 className="mr-2 size-4" /> Eliminar
+                  </DropdownMenuItem>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      ¿Estás absolutamente seguro?
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Esta acción no se puede deshacer. Esto eliminará
+                      permanentemente la organización y todos sus elementos
+                      (Scorecards, KPIs, etc.).
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={handleDeleteOrganization}
+                      className="bg-red-600 hover:bg-red-700 focus:ring-red-500"
+                    >
+                      Eliminar
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </CardHeader>
       <CardContent>
-        <CardDescription className="text-sm">
-          {organization.description || "Sin descripción."}
-        </CardDescription>
-        {/* Futura visualización de la jerarquía o KPIs resumen */}
+        {organization.description && (
+          <CardDescription className="mb-4">
+            {organization.description}
+          </CardDescription>
+        )}
+        {organization.children && organization.children.length > 0 && (
+          <div className="mt-4 border-l-2 pl-4">
+            {organization.children.map(childOrg => (
+              <OrganizationCard
+                key={childOrg.id}
+                organization={childOrg}
+                level={level + 1}
+              />
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   )
 }
+
+export default OrganizationCard
