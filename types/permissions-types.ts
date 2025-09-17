@@ -1,79 +1,103 @@
 /**
- *  @file types/permissions-types.ts
- *  @brief Define tipos relacionados con la gestión de permisos de usuario.
- *  @description Este archivo unifica y mejora la versión 1 con los aportes de la versión 2:
- *   - Mantiene la interfaz `UserPermission` para modelar la respuesta del backend (compatibilidad).
- *   - Define `UserPermissionsMap` usando un sentinel `'global'` para permisos sin organización
- *     (evita usar `null` como clave de objeto en JS/TS).
- *   - Agrega `PermissionContextType` para el contexto de permisos en el frontend.
- *   - Incluye utilidades para normalizar el `organizationId` y una fábrica de `hasPermission`.
+ * @file types/permissions-types.ts
+ * @brief Define tipos relacionados con la gestión de permisos de usuario.
+ * @description Este archivo unifica y mejora la versión 1 con los aportes de la versión 2:
+ *  - Mantiene la interfaz UserPermission para modelar la respuesta del backend (compatibilidad).
+ *  - Define UserPermissionsMap usando un sentinel 'global' para permisos sin organización
+ *  - Agrega PermissionContextType para el contexto de permisos en el frontend.
+ *  - Incluye utilidades para normalizar el organizationId y una fábrica de hasPermission.
  */
 
-/**
- *  @interface UserPermission
- *  @description Representa un permiso específico asignado a un usuario (a través de sus grupos).
- *  @property {string} permissionKey - La clave única que identifica el permiso (ej. 'organization:create').
- *  @property {boolean} permissionValue - El valor del permiso (true si está concedido, false si está denegado).
- *  @property {string | null} organizationId - El ID de la organización a la que aplica el permiso, o `null` si es global.
- */
-export interface UserPermission {
+import { z } from "zod"
+
+/** =========================
+ *  Permission keys (v2)
+ *  ========================= */
+export type PermissionKey =
+  | "user:manage"
+  | "group:manage"
+  | "group:assign_members"
+  | "group:assign_permissions"
+  | "organization:manage"
+  | "kpi:manage"
+  | "scorecard_element:manage"
+  | "import:manage_connections"
+  | "import:manage_saved_imports"
+  | "alert:manage"
+
+/** =========================
+ *  Backend shapes (v1 & v2)
+ *  ========================= */
+
+// v1 (backend legacy)
+export interface BackendUserPermissionV1 {
   permissionKey: string
   permissionValue: boolean
   organizationId: string | null
 }
 
-/**
- *  @type OrgScope
- *  @description Clave de alcance para indexar permisos por organización.
- *  - Para permisos globales (cuando el backend entrega `organizationId: null`) se usa el sentinel `'global'`.
- *  - Para permisos por organización, se usa el UUID de la organización (string).
- */
+// v2 (typed)
+export interface BackendUserPermissionV2 {
+  key: PermissionKey
+  value: boolean
+  organizationId: string | null
+}
+
+// Aceptamos ambos formatos de backend
+export type BackendUserPermission =
+  | BackendUserPermissionV1
+  | BackendUserPermissionV2
+
+const isV1 = (p: BackendUserPermission): p is BackendUserPermissionV1 =>
+  (p as BackendUserPermissionV1).permissionKey !== undefined
+
+const isV2 = (p: BackendUserPermission): p is BackendUserPermissionV2 =>
+  (p as BackendUserPermissionV2).key !== undefined
+
+/** =========================
+ *  Org scoping & maps
+ *  ========================= */
+
 export type OrgScope = string | "global"
 
-/**
- *  @type UserPermissionsMap
- *  @description Tipo auxiliar para un acceso más eficiente a los permisos por clave y organización.
- *  Mapea la `permissionKey` a un objeto que contiene permisos específicos por `OrgScope`.
- *  NOTA: Usamos `'global'` como representación del caso `organizationId: null` que viene del backend.
- *
- *  Ejemplo de forma:
- *  {
- *    "organization:create": { "global": true, "org-uuid-1": false },
- *    "project:read": { "org-uuid-1": true, "org-uuid-2": true }
- *  }
- */
+export const toOrgScope = (organizationId?: string | null): OrgScope =>
+  organizationId ?? "global"
+
+// Compat: mapa laxa (acepta claves no declaradas, ej. flags experimentales)
 export type UserPermissionsMap = Record<string, Record<OrgScope, boolean>>
 
-/**
- *  @interface PermissionContextType
- *  @description Define la estructura del objeto de contexto de permisos para el frontend.
- *  @property {UserPermissionsMap | null} userPermissions - Un mapa de los permisos del usuario actual, o null si no se han cargado.
- *  @property {boolean} isLoading - Indica si los permisos están cargándose.
- *  @property {(permissionKey: string, organizationId?: string | null) => boolean} hasPermission - Función para verificar si el usuario tiene un permiso específico.
- */
+// Opcional: versión estricta si quieres cerrar a PermissionKey
+export type StrictUserPermissionsMap = {
+  [K in PermissionKey]?: Record<OrgScope, boolean>
+}
+
+/** =========================
+ *  Contexto (no romper v1)
+ *  ========================= */
+
+// v1: conserva nombres/props (incluye isLoading)
 export interface PermissionContextType {
   userPermissions: UserPermissionsMap | null
+  // alias v2: algunos consumidores nuevos esperan `permissions`
+  permissions?: UserPermissionsMap | null
   isLoading: boolean
   hasPermission: (
-    permissionKey: string,
+    permissionKey: string, // mantener string para compatibilidad
     organizationId?: string | null
   ) => boolean
 }
 
-/**
- *  Normaliza un `organizationId` que puede venir como `string | null | undefined` desde el backend o la UI
- *  a la clave de alcance (`OrgScope`) que usamos en el mapa: UUID de org o `'global'`.
- */
-export const toOrgScope = (organizationId?: string | null): OrgScope =>
-  organizationId ?? "global"
+/** =========================
+ *  Utilidades
+ *  ========================= */
+
+export const normalizeOrganizationId = (
+  organizationId: string | null | undefined
+): string => (organizationId == null ? "global" : organizationId)
 
 /**
- *  Fábrica de verificador de permisos.
- *  - Prioriza el permiso específico por organización (si existe).
- *  - Si no hay permiso específico, cae al permiso global (si existe).
- *  - Si no encuentra ninguno, retorna `false`.
- *
- *  Esta función es opcional: puedes inyectarla en tu contexto como `hasPermission`.
+ * Fábrica v1 con fallback:
+ * 1) permiso por org → 2) global → 3) false
  */
 export const makeHasPermission =
   (permissions: UserPermissionsMap | null) =>
@@ -81,30 +105,66 @@ export const makeHasPermission =
     if (!permissions) return false
     const scoped = permissions[permissionKey]
     if (!scoped) return false
-
     const scope = toOrgScope(organizationId)
-    // 1) Intenta permiso por organización; 2) fallback a global; 3) false
     return scoped[scope] ?? scoped["global"] ?? false
   }
 
 /**
- *  (Opcional) Utilidad para construir un `UserPermissionsMap` a partir de una lista de `UserPermission`
- *  entregada por el backend. Mantiene compatibilidad con v1 y aplica la normalización `null -> 'global'`.
+ * Alias v2 de la fábrica, manteniendo el comportamiento con fallback.
+ * Firma más estricta en la sobrecarga, pero implementación acepta string.
+ */
+export function createHasPermission(permissions: UserPermissionsMap | null): {
+  (key: PermissionKey, organizationId?: string | null): boolean
+  (key: string, organizationId?: string | null): boolean
+}
+export function createHasPermission(permissions: UserPermissionsMap | null) {
+  return makeHasPermission(permissions)
+}
+
+/**
+ * Construye un UserPermissionsMap desde una lista (acepta v1 y v2).
  */
 export const buildUserPermissionsMap = (
-  userPermissionsList: UserPermission[]
+  list: BackendUserPermission[]
 ): UserPermissionsMap => {
   const map: UserPermissionsMap = {}
+  for (const p of list) {
+    const permissionKey = isV1(p) ? p.permissionKey : p.key
+    const permissionValue = isV1(p) ? p.permissionValue : p.value
+    const scope = toOrgScope(p.organizationId)
 
-  for (const {
-    permissionKey,
-    permissionValue,
-    organizationId
-  } of userPermissionsList) {
-    const scope = toOrgScope(organizationId)
     map[permissionKey] ??= {}
     map[permissionKey][scope] = permissionValue
   }
-
   return map
 }
+
+/** =========================
+ *  Schemas
+ *  ========================= */
+
+// Mantiene nombres v1 (backend contracts existentes)
+export const upsertPermissionSchema = z.object({
+  groupId: z.string().uuid("ID de grupo inválido."),
+  permissionKey: z.enum(
+    [
+      "user:manage",
+      "group:manage",
+      "group:assign_members",
+      "group:assign_permissions",
+      "organization:manage",
+      "kpi:manage",
+      "scorecard_element:manage",
+      "import:manage_connections",
+      "import:manage_saved_imports",
+      "alert:manage"
+    ],
+    { errorMap: () => ({ message: "Clave de permiso inválida." }) }
+  ),
+  permissionValue: z.boolean(),
+  organizationId: z
+    .string()
+    .uuid("ID de organización inválido.")
+    .nullable()
+    .optional()
+})

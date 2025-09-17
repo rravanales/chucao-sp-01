@@ -161,7 +161,6 @@ export default function ScorecardElementEditor({
     } else {
       setParentElements([])
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.watch("organizationId"), isEditMode, scorecardElement?.id, toast])
 
   const onSubmit = async (values: z.infer<typeof formSchema>) => {

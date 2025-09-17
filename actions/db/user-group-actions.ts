@@ -1,20 +1,13 @@
 /**
  * @file actions/db/user-group-actions.ts
  * @brief Implementa Server Actions para la gestión de usuarios y grupos en DeltaOne.
- * @description Este archivo contiene funciones del lado del servidor para gestionar
- * la creación, recuperación, actualización y eliminación de grupos de usuarios,
- * la asignación de miembros a estos grupos, y la gestión de permisos asociados a ellos.
- * También incluye acciones para la gestión del perfil local de los usuarios (profilesTable)
- * y la integración con el sistema de autenticación de Clerk a un nivel conceptual.
- *
- * Corrección (UC-401):
- * - Se modifica el "Bulk Import Users" para que el server action reciba un archivo
- *   codificado en Base64 (CSV) y lo procese internamente, en lugar de exigir
- *   un arreglo de usuarios ya parseado desde el cliente.
- *
- * Nuevas funcionalidades (UC-503, Paso 6.2.1):
- * - Implementación de `getUserPermissionsAction` para obtener todos los permisos de un usuario.
- * - `assignRollupTreeGroupPermissionsAction` ya implementada con soporte de descendientes.
+ * @description Basado en la **versión 1**, incorporando las mejoras de la **versión 2**
+ * sin perder compatibilidad ni funcionalidades:
+ *  - Se mantiene TODO el contrato público de v1 (mismas funciones, payloads y semánticas).
+ *  - Se agrega **getUserPermissionsMapAction** (mejora v2) que consolida permisos del usuario
+ *    en un `UserPermissionsMap` (fuente única de verdad para checks en UI/backend).
+ *  - Se mantiene `assignRollupTreeGroupPermissionsAction` con soporte de descendientes.
+ *  - Se mantiene la corrección UC-401 con importación masiva desde CSV Base64 (parser interno).
  */
 
 "use server";
@@ -25,7 +18,7 @@ import {
   InsertGroupMember,
   InsertGroupPermission,
   SelectGroup,
-  SelectGroupPermission, // <-- requerido para getUserPermissionsAction
+  SelectGroupPermission,
   groupMembersTable,
   groupPermissionsTable,
   groupsTable,
@@ -41,6 +34,12 @@ import { z } from "zod";
 import { getLogger } from "@/lib/logger";
 import crypto from "crypto";
 import { getDescendantOrganizations } from "@/lib/organization-utils";
+
+/** Mejora v2: tipos y utilidades de permisos (compatibles con v1) */
+import {
+  UserPermissionsMap,
+  toOrgScope, // normaliza organizationId -> OrgScope ('global' | uuid)
+} from "@/types/permissions-types";
 
 const logger = getLogger("user-group-actions");
 
@@ -139,7 +138,7 @@ const BulkImportUserSchema = z.object({
 });
 
 /**
- * CORRECCIÓN UC-401:
+ * CORRECCIÓN UC-401 (v1):
  * El payload ahora es un objeto con metadatos del archivo y su contenido en Base64.
  * El servidor se encarga de decodificar y parsear (CSV simple).
  */
@@ -328,7 +327,7 @@ export async function assignGroupPermissionsAction(
   if (!group) return fail("Grupo no encontrado.");
 
   await db.transaction(async (tx) => {
-    // Borrado simple por groupId. (Si necesitas granularidad por clave/organización, ajustar aquí.)
+    // Borrado simple por groupId. (Mantener semántica v1: sobrescribir set completo del grupo)
     await tx.delete(groupPermissionsTable).where(eq(groupPermissionsTable.groupId, groupId));
 
     if (permissions.length > 0) {
@@ -350,6 +349,7 @@ export async function assignGroupPermissionsAction(
 /**
  * Asigna permisos a un grupo para una organización y opcionalmente a toda su descendencia.
  * Usa getDescendantOrganizations(db, organizationId) -> Promise<string[]>.
+ * (Mantiene la implementación y contrato de v1)
  */
 export async function assignRollupTreeGroupPermissionsAction(
   data: z.infer<typeof assignRollupTreeGroupPermissionsSchema>,
@@ -964,14 +964,12 @@ export async function deactivateUserAction(
 }
 
 /* -------------------------------------------------------------------------- */
-/*                       MEJORA v2: getUserPermissionsAction                  */
+/*                       Permisos de usuario (v1 + mejora v2)                 */
 /* -------------------------------------------------------------------------- */
 
 /**
- * @function getUserPermissionsAction
- * @description Obtiene todos los permisos (globales y específicos de organización)
- * concedidos (permissionValue = true) al usuario autenticado a través de sus grupos.
- * @returns {Promise<ActionState<SelectGroupPermission[]>>}
+ * (v1, compat) Obtiene TODOS los registros de permisos concedidos (true)
+ * del usuario autenticado como una lista de filas de group_permissions.
  */
 export async function getUserPermissionsAction(): Promise<ActionState<SelectGroupPermission[]>> {
   const { userId } = await auth();
@@ -1014,5 +1012,67 @@ export async function getUserPermissionsAction(): Promise<ActionState<SelectGrou
       userId,
     });
     return fail("Fallo al obtener los permisos del usuario.");
+  }
+}
+
+/**
+ * (MEJORA v2) Devuelve los permisos del usuario autenticado consolidados
+ * en un `UserPermissionsMap`.
+ *
+ * Reglas:
+ * - Sólo mapeamos `permissionValue = true` (activos). Ausencia => false.
+ * - Se respeta el scope por organización y el scope 'global' para `organizationId = null`.
+ */
+export async function getUserPermissionsMapAction(): Promise<ActionState<UserPermissionsMap>> {
+  const { userId } = await auth();
+  if (!userId) {
+    logger.warn("Unauthorized attempt to get user permissions map.");
+    return fail("No autorizado. Debe iniciar sesión.");
+  }
+
+  try {
+    // 1) Obtener todos los grupos a los que pertenece el usuario
+    const userGroups = await db
+      .select({ groupId: groupMembersTable.groupId })
+      .from(groupMembersTable)
+      .where(eq(groupMembersTable.userId, userId));
+
+    const groupIds = userGroups.map((gm) => gm.groupId);
+    if (groupIds.length === 0) {
+      logger.info(`User ${userId} is not part of any group. No permissions found.`);
+      return ok("Mapa de permisos obtenido exitosamente.", {} as UserPermissionsMap);
+    }
+
+    // 2) Obtener permisos concedidos (true) para esos grupos
+    const rawPermissions = await db
+      .select()
+      .from(groupPermissionsTable)
+      .where(
+        and(
+          inArray(groupPermissionsTable.groupId, groupIds),
+          eq(groupPermissionsTable.permissionValue, true),
+        ),
+      );
+
+    // 3) Consolidar en `UserPermissionsMap`
+    const map: UserPermissionsMap = {};
+
+    for (const perm of rawPermissions) {
+      const scope = toOrgScope(perm.organizationId);
+      map[perm.permissionKey] ??= {};
+      // Si hay duplicados por el mismo scope, true prevalece (ya es true).
+      map[perm.permissionKey][scope] = true;
+    }
+
+    logger.info(`User ${userId} permissions map loaded.`, {
+      keys: Object.keys(map).length,
+    });
+
+    return ok("Mapa de permisos de usuario obtenido exitosamente.", map);
+  } catch (error: any) {
+    logger.error(`Error getting user permissions map: ${error?.message ?? String(error)}`, {
+      userId,
+    });
+    return fail("Fallo al obtener el mapa de permisos del usuario.");
   }
 }

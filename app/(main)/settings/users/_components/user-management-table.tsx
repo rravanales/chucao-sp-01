@@ -1,10 +1,10 @@
 /**
  * @file app/(main)/settings/users/_components/user-management-table.tsx
  * @brief Componente de cliente para la administración y visualización de usuarios.
- * @description Este componente ofrece una tabla interactiva para listar perfiles de usuario,
- * permitiendo operaciones de edición individual (UC-400), desactivación (UC-400),
- * y la importación masiva de usuarios (UC-401). Utiliza Server Actions para la
- * persistencia de datos y Shadcn UI para la construcción de la interfaz.
+ * @description Versión 2.1: mantiene contrato de v1 y agrega control por permisos:
+ *  - Props v1: initialProfiles, initialGroups (compatibles).
+ *  - Nuevo (opcional): canManageUsers para habilitar/inhabilitar acciones (v2).
+ *  - Conserva edición individual (UC-400), desactivación (UC-400) e importación masiva (UC-401).
  */
 "use client"
 
@@ -86,11 +86,13 @@ import {
  * @interface UserManagementTableProps
  * @description Propiedades para el componente UserManagementTable.
  * @property {SelectProfile[]} initialProfiles - Lista inicial de perfiles de usuario.
- * @property {SelectGroup[]} initialGroups - Lista inicial de grupos de usuarios (para mostrar membresías).
+ * @property {SelectGroup[]} initialGroups - Lista inicial de grupos (para mostrar membresías).
+ * @property {boolean} [canManageUsers] - Si el usuario puede gestionar (editar/desactivar/importar). Default: true.
  */
 interface UserManagementTableProps {
   initialProfiles: SelectProfile[]
   initialGroups: SelectGroup[]
+  canManageUsers?: boolean
 }
 
 /**
@@ -121,8 +123,6 @@ const userEditFormSchema = z.object({
 /**
  * @function UserEditForm
  * @description Formulario para editar un perfil de usuario.
- * @param {UserEditFormProps} props - Propiedades del formulario.
- * @returns {JSX.Element}
  */
 const UserEditForm: React.FC<UserEditFormProps> = ({ user, onSuccess }) => {
   const { toast } = useToast()
@@ -225,7 +225,6 @@ const UserEditForm: React.FC<UserEditFormProps> = ({ user, onSuccess }) => {
 /**
  * @interface BulkImportUsersFormProps
  * @description Propiedades para el formulario de importación masiva de usuarios.
- * @property {() => void} onSuccess - Callback a ejecutar después de una importación exitosa.
  */
 interface BulkImportUsersFormProps {
   onSuccess: () => void
@@ -244,10 +243,7 @@ const bulkImportFormSchema = z.object({
 
 /**
  * @function BulkImportUsersForm
- * @description Formulario para la importación masiva de usuarios mediante un archivo.
- * @param {BulkImportUsersFormProps} props - Propiedades del formulario.
- * @returns {JSX.Element}
- * @notes Se espera un archivo CSV simple con headers como `email,firstName,lastName,groupKeys` (groupKeys separados por `;`).
+ * @description Formulario para la importación masiva de usuarios mediante un archivo CSV Base64.
  */
 const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
   onSuccess,
@@ -279,7 +275,7 @@ const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
       reader.onload = async event => {
         const base64Content = event.target?.result as string
 
-        // Corregido: solo la parte base64, no array
+        // Extraer la parte base64 (después de la coma)
         const cleanBase64 = base64Content.includes(",")
           ? base64Content.split(",")[1]
           : base64Content
@@ -380,27 +376,30 @@ const BulkImportUsersForm: React.FC<BulkImportUsersFormProps> = ({
 /**
  * @function UserManagementTable
  * @description Componente principal para la gestión de usuarios.
- * @param {UserManagementTableProps} props - Propiedades iniciales de perfiles y grupos.
- * @returns {JSX.Element}
  */
 const UserManagementTable: React.FC<UserManagementTableProps> = ({
   initialProfiles,
-  initialGroups
+  initialGroups,
+  canManageUsers = true
 }) => {
   const { toast } = useToast()
   const router = useRouter()
   const [profiles, setProfiles] = useState<SelectProfile[]>(initialProfiles)
   const [isBulkImportDialogOpen, setIsBulkImportDialogOpen] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
   useEffect(() => {
     setProfiles(initialProfiles)
   }, [initialProfiles])
 
   const getUserGroups = (userId: string) => {
+    // v1: muestra todos los nombres de grupo (placeholder).
+    // Se mantiene por compatibilidad; si se añade mapping user->groups, reemplazar aquí.
     return initialGroups.map(group => group.name).join(", ")
   }
 
   const handleDeleteUser = async (userId: string) => {
+    setIsSubmitting(true)
     const result = await deactivateUserAction({ userId })
     if (result.isSuccess) {
       toast({ title: "Éxito", description: "Usuario desactivado." })
@@ -412,6 +411,7 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
         variant: "destructive"
       })
     }
+    setIsSubmitting(false)
   }
 
   return (
@@ -422,7 +422,7 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
           onOpenChange={setIsBulkImportDialogOpen}
         >
           <DialogTrigger asChild>
-            <Button variant="outline">
+            <Button variant="outline" disabled={!canManageUsers}>
               <UploadCloud className="mr-2 size-4" /> Importar Usuarios
               Masivamente
             </Button>
@@ -479,7 +479,11 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
                 <TableCell className="text-right">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" className="size-8 p-0">
+                      <Button
+                        variant="ghost"
+                        className="size-8 p-0"
+                        disabled={!canManageUsers}
+                      >
                         <span className="sr-only">Abrir menú</span>
                         <MoreVertical className="size-4" />
                       </Button>
@@ -487,7 +491,10 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
                     <DropdownMenuContent align="end">
                       <Dialog>
                         <DialogTrigger asChild>
-                          <DropdownMenuItem onSelect={e => e.preventDefault()}>
+                          <DropdownMenuItem
+                            onSelect={e => e.preventDefault()}
+                            disabled={!canManageUsers}
+                          >
                             <Edit className="mr-2 size-4" /> Editar
                           </DropdownMenuItem>
                         </DialogTrigger>
@@ -510,6 +517,7 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
                           <DropdownMenuItem
                             onSelect={e => e.preventDefault()}
                             className="text-red-600"
+                            disabled={!canManageUsers || isSubmitting}
                           >
                             <UserRoundX className="mr-2 size-4" /> Desactivar
                           </DropdownMenuItem>
@@ -530,7 +538,13 @@ const UserManagementTable: React.FC<UserManagementTableProps> = ({
                             <AlertDialogAction
                               onClick={() => handleDeleteUser(user.userId)}
                               className="bg-red-600 hover:bg-red-700 focus:ring-red-500"
+                              disabled={!canManageUsers || isSubmitting}
                             >
+                              {isSubmitting ? (
+                                <Loader2 className="mr-2 size-4 animate-spin" />
+                              ) : (
+                                <UserRoundX className="mr-2 size-4" />
+                              )}
                               Desactivar
                             </AlertDialogAction>
                           </AlertDialogFooter>

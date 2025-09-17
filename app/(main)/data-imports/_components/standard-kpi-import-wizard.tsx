@@ -321,7 +321,6 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
         scheduleConfig: undefined
       })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedImport])
 
   const nextStep = () => setCurrentStep(prev => prev + 1)
