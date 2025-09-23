@@ -1,6 +1,9 @@
 /**
  * @file app/(main)/data-imports/_components/standard-kpi-import-wizard.tsx
  * @brief Componente de cliente para la gestión y configuración de importaciones estándar de KPI.
+ * @description Basado en la versión 1, incorporando control de permisos (usePermissions) para
+ * condicionar la visibilidad de las acciones de cada importación guardada, tal como en la versión 2,
+ * sin perder funcionalidades ni romper compatibilidad.
  */
 "use client"
 
@@ -13,7 +16,7 @@ import {
   updateSavedKpiImportAction,
   deleteSavedKpiImportAction,
   executeSavedKpiImportAction,
-  scheduleKpiImportAction,
+  scheduleKpiImportAction, // (importado aunque no usado aún; compatibilidad con futuras mejoras)
   unscheduleKpiImportAction
 } from "@/actions/db/import-actions"
 // ⬇️ usamos la nueva acción en kpi-actions3
@@ -110,6 +113,9 @@ import {
   DialogTrigger
 } from "@/components/ui/dialog"
 
+// ⬇️ NUEVO: control de permisos (aportado por la versión 2)
+import { usePermissions } from "@/context/permission-context"
+
 /**
  * Tipos auxiliares locales
  */
@@ -122,6 +128,11 @@ interface StandardKpiImportWizardProps {
   connections: SelectImportConnection[]
   savedImport?: SelectSavedImport | null
   savedImports?: SelectSavedImport[] | null
+  /**
+   * Callback opcional que se dispara cuando la importación se creó/actualizó exitosamente.
+   * Útil para que el componente padre cierre diálogos y refresque datos.
+   */
+  onSuccess?: () => void
 }
 
 /**
@@ -231,7 +242,8 @@ const KpiMappingRow: React.FC<KpiMappingRowProps> = ({
 const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
   connections,
   savedImport = null,
-  savedImports = null
+  savedImports = null,
+  onSuccess
 }) => {
   const isEditMode = !!savedImport
   const { toast } = useToast()
@@ -239,6 +251,10 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
   const [currentStep, setCurrentStep] = useState(1)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [kpiOptions, setKpiOptions] = useState<KpiOption[]>([])
+
+  // ⬇️ NUEVO: permisos
+  const { hasPermission } = usePermissions()
+  const canManageSavedImports = hasPermission("import:manage_saved_imports")
 
   const defaultConnectionId =
     savedImport?.connectionId ?? connections[0]?.id ?? ""
@@ -343,6 +359,7 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
       }
 
       if (isEditMode && savedImport?.id) {
+        // ⬇️ Mantener firma de la v1 para compatibilidad
         result = await updateSavedKpiImportAction(savedImport.id, payload)
       } else {
         result = await createSavedKpiImportAction(payload)
@@ -355,7 +372,8 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
         })
         form.reset()
         router.refresh()
-        onCloseDialog()
+        // Notifica al padre (cerrar diálogo, refrescar listas, etc.)
+        onSuccess?.()
       } else {
         toast({
           title: "Error",
@@ -375,6 +393,16 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
   }
 
   const handleDeleteImport = async (id: string) => {
+    // ⬇️ Defensa extra opcional: bloquear si no hay permiso
+    if (!canManageSavedImports) {
+      toast({
+        title: "Permisos insuficientes",
+        description: "No tienes permisos para eliminar importaciones estándar.",
+        variant: "destructive"
+      })
+      return
+    }
+
     const result = await deleteSavedKpiImportAction({ id })
     if (result.isSuccess) {
       toast({
@@ -392,6 +420,15 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
   }
 
   const handleExecuteImport = async (id: string) => {
+    if (!canManageSavedImports) {
+      toast({
+        title: "Permisos insuficientes",
+        description: "No tienes permisos para ejecutar importaciones estándar.",
+        variant: "destructive"
+      })
+      return
+    }
+
     toast({
       title: "Ejecutando",
       description: "La importación de KPI está en curso..."
@@ -416,6 +453,16 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
     id: string,
     currentSchedule: ScheduleConfig | null | undefined
   ) => {
+    if (!canManageSavedImports) {
+      toast({
+        title: "Permisos insuficientes",
+        description:
+          "No tienes permisos para gestionar la programación de importaciones.",
+        variant: "destructive"
+      })
+      return
+    }
+
     if (currentSchedule) {
       const result = await unscheduleKpiImportAction({ id })
       if (result.isSuccess) {
@@ -436,10 +483,6 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
       })
       // Aquí abrirías un diálogo para configurar scheduleConfig
     }
-  }
-
-  const onCloseDialog = () => {
-    // placeholder
   }
 
   // Listado de importaciones existentes (cuando no estamos editando una en particular)
@@ -506,82 +549,89 @@ const StandardKpiImportWizard: React.FC<StandardKpiImportWizardProps> = ({
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" className="size-8 p-0">
-                          <span className="sr-only">Abrir menú</span>
-                          <MoreVertical className="size-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <Dialog>
-                          <DialogTrigger asChild>
-                            <DropdownMenuItem
-                              onSelect={e => e.preventDefault()}
-                            >
-                              <Edit className="mr-2 size-4" /> Editar
-                            </DropdownMenuItem>
-                          </DialogTrigger>
-                          <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[800px]">
-                            <DialogHeader>
-                              <DialogTitle>
-                                Editar Importación Estándar de KPI
-                              </DialogTitle>
-                              <DialogDescription>
-                                Modifica la configuración de esta importación
-                                avanzada.
-                              </DialogDescription>
-                            </DialogHeader>
-                            <StandardKpiImportWizard
-                              connections={connections}
-                              savedImport={imp}
-                            />
-                          </DialogContent>
-                        </Dialog>
-                        <DropdownMenuItem
-                          onClick={() => handleExecuteImport(imp.id)}
-                        >
-                          <Play className="mr-2 size-4" /> Ejecutar Ahora
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => handleScheduleToggle(imp.id, sc)}
-                        >
-                          <CalendarDays className="mr-2 size-4" />{" "}
-                          {sc ? "Desprogramar" : "Programar"}
-                        </DropdownMenuItem>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <DropdownMenuItem
-                              onSelect={e => e.preventDefault()}
-                              className="text-red-600"
-                            >
-                              <Trash2 className="mr-2 size-4" /> Eliminar
-                            </DropdownMenuItem>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>
-                                ¿Estás absolutamente seguro?
-                              </AlertDialogTitle>
-                              <AlertDialogDescription>
-                                Esta acción no se puede deshacer. Esto eliminará
-                                permanentemente la configuración de la
-                                importación estándar.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => handleDeleteImport(imp.id)}
-                                className="bg-red-600 hover:bg-red-700 focus:ring-red-500"
+                    {/* ⬇️ NUEVO: mostrar acciones solo si el usuario tiene permiso */}
+                    {canManageSavedImports && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="size-8 p-0">
+                            <span className="sr-only">Abrir menú</span>
+                            <MoreVertical className="size-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <Dialog>
+                            <DialogTrigger asChild>
+                              <DropdownMenuItem
+                                onSelect={e => e.preventDefault()}
                               >
-                                Eliminar
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                                <Edit className="mr-2 size-4" /> Editar
+                              </DropdownMenuItem>
+                            </DialogTrigger>
+                            <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[800px]">
+                              <DialogHeader>
+                                <DialogTitle>
+                                  Editar Importación Estándar de KPI
+                                </DialogTitle>
+                                <DialogDescription>
+                                  Modifica la configuración de esta importación
+                                  avanzada.
+                                </DialogDescription>
+                              </DialogHeader>
+                              <StandardKpiImportWizard
+                                connections={connections}
+                                savedImport={imp}
+                                // Si se provee onSuccess desde el padre, se respeta; de lo contrario refrescamos
+                                onSuccess={() => {
+                                  router.refresh()
+                                }}
+                              />
+                            </DialogContent>
+                          </Dialog>
+                          <DropdownMenuItem
+                            onClick={() => handleExecuteImport(imp.id)}
+                          >
+                            <Play className="mr-2 size-4" /> Ejecutar Ahora
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => handleScheduleToggle(imp.id, sc)}
+                          >
+                            <CalendarDays className="mr-2 size-4" />{" "}
+                            {sc ? "Desprogramar" : "Programar"}
+                          </DropdownMenuItem>
+                          <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                              <DropdownMenuItem
+                                onSelect={e => e.preventDefault()}
+                                className="text-red-600"
+                              >
+                                <Trash2 className="mr-2 size-4" /> Eliminar
+                              </DropdownMenuItem>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>
+                                  ¿Estás absolutamente seguro?
+                                </AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  Esta acción no se puede deshacer. Esto
+                                  eliminará permanentemente la configuración de
+                                  la importación estándar.
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                                <AlertDialogAction
+                                  onClick={() => handleDeleteImport(imp.id)}
+                                  className="bg-red-600 hover:bg-red-700 focus:ring-red-500"
+                                >
+                                  Eliminar
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                   </TableCell>
                 </TableRow>
               )

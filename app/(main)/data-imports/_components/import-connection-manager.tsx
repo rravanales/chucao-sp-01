@@ -6,15 +6,15 @@
  * Utiliza Server Actions para todas las operaciones CRUD y `shadcn/ui` para la interfaz.
  * Las credenciales sensibles se gestionan mediante cifrado/descifrado.
  * (UC-202: Gestionar Conexiones de Importación de Datos)
+ *
+ * Mejora incluida desde v2:
+ * - Control de permisos con `usePermissions` para mostrar/ocultar acciones de Editar/Eliminar y "Nueva Conexión"
+ *   solo si el usuario tiene el permiso `import:manage_connections`.
  */
 "use client"
 
 import React, { useState, useEffect } from "react"
-import {
-  SelectImportConnection,
-  importConnectionTypeEnum,
-  SelectKpi
-} from "@/db/schema"
+import { SelectImportConnection, importConnectionTypeEnum } from "@/db/schema"
 import {
   createImportConnectionAction,
   updateImportConnectionAction,
@@ -48,7 +48,7 @@ import {
   TestTube,
   Loader2,
   Save,
-  PlusCircle // FIX #3: import faltante
+  PlusCircle // FIX #3: import faltante (se mantiene)
 } from "lucide-react"
 import {
   Dialog,
@@ -89,6 +89,7 @@ import {
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
+import { usePermissions } from "@/context/permission-context" // Mejora v2: permisos
 
 // ================================================
 // FIX #1: Definir un Zod schema local para validar
@@ -185,7 +186,7 @@ const ImportConnectionForm: React.FC<ImportConnectionFormProps> = ({
       connectionType: connection?.connectionType || "Excel",
       connectionDetails: connection?.connectionDetails
         ? JSON.stringify(connection.connectionDetails, null, 2)
-        : '{\n  "filePath": "",\n  "databaseName": "",\n  "server": "",\n  "port": 5432,\n  "user": "",\n  "password": "",\n  "query": ""\n}'
+        : '{\n  "filePath": "",\n  "databaseName": "",\n  "server": "",\n  "port": 5432,\n  "user": "",\n  "password": "",\n  "query": ""\n}' // Se mantiene la plantilla útil de la v1
     }
   })
 
@@ -375,12 +376,17 @@ const ImportConnectionForm: React.FC<ImportConnectionFormProps> = ({
  * @function ImportConnectionManager
  * @description Componente principal para la gestión de conexiones de importación.
  * Muestra una tabla con las conexiones existentes y maneja la eliminación y edición.
+ * Aplica control de permisos para mostrar acciones de gestión.
  */
 const ImportConnectionManager: React.FC<ImportConnectionManagerProps> = ({
   connections
 }) => {
   const { toast } = useToast()
   const router = useRouter()
+  const { hasPermission } = usePermissions() // Mejora v2: obtener permisos
+
+  // Verificar el permiso para gestionar conexiones de importación.
+  const canManageConnections = hasPermission("import:manage_connections")
 
   // FIX #2: deleteImportConnectionAction espera string, no { id: string }
   const handleDeleteConnection = async (id: string) => {
@@ -421,8 +427,10 @@ const ImportConnectionManager: React.FC<ImportConnectionManagerProps> = ({
     <div>
       {connections.length === 0 ? (
         <p className="text-muted-foreground py-8 text-center">
-          No hay conexiones de importación configuradas. Haz clic en "Nueva
-          Conexión" para empezar.
+          No hay conexiones de importación configuradas.{" "}
+          {canManageConnections
+            ? 'Haz clic en "Nueva Conexión" para empezar.'
+            : "Consulta con un administrador para obtener permisos si necesitas crear una."}
         </p>
       ) : (
         <Table>
@@ -450,72 +458,77 @@ const ImportConnectionManager: React.FC<ImportConnectionManagerProps> = ({
                   {new Date(connection.updatedAt).toLocaleDateString()}
                 </TableCell>
                 <TableCell className="text-right">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" className="size-8 p-0">
-                        <span className="sr-only">Abrir menú</span>
-                        <MoreVertical className="size-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <Dialog>
-                        <DialogTrigger asChild>
-                          <DropdownMenuItem onSelect={e => e.preventDefault()}>
-                            <Edit className="mr-2 size-4" /> Editar
-                          </DropdownMenuItem>
-                        </DialogTrigger>
-                        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]">
-                          <DialogHeader>
-                            <DialogTitle>
-                              Editar Conexión de Importación
-                            </DialogTitle>
-                            <DialogDescription>
-                              Modifica los detalles de tu conexión de
-                              importación.
-                            </DialogDescription>
-                          </DialogHeader>
-                          <ImportConnectionForm
-                            connection={connection}
-                            onSuccess={() => router.refresh()}
-                          />
-                        </DialogContent>
-                      </Dialog>
-
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <DropdownMenuItem
-                            onSelect={e => e.preventDefault()}
-                            className="text-red-600"
-                          >
-                            <Trash2 className="mr-2 size-4" /> Eliminar
-                          </DropdownMenuItem>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              ¿Estás absolutamente seguro?
-                            </AlertDialogTitle>
-                            <AlertDialogDescription>
-                              Esta acción no se puede deshacer. Esto eliminará
-                              permanentemente la conexión de importación y todas
-                              las importaciones guardadas que la utilicen.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() =>
-                                handleDeleteConnection(connection.id)
-                              }
-                              className="bg-red-600 hover:bg-red-700 focus:ring-red-500"
+                  {canManageConnections && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" className="size-8 p-0">
+                          <span className="sr-only">Abrir menú</span>
+                          <MoreVertical className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <Dialog>
+                          <DialogTrigger asChild>
+                            <DropdownMenuItem
+                              onSelect={e => e.preventDefault()}
                             >
-                              Eliminar
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                              <Edit className="mr-2 size-4" /> Editar
+                            </DropdownMenuItem>
+                          </DialogTrigger>
+                          <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]">
+                            <DialogHeader>
+                              <DialogTitle>
+                                Editar Conexión de Importación
+                              </DialogTitle>
+                              <DialogDescription>
+                                Modifica los detalles de tu conexión de
+                                importación.
+                              </DialogDescription>
+                            </DialogHeader>
+                            <ImportConnectionForm
+                              connection={connection}
+                              onSuccess={() => router.refresh()}
+                            />
+                          </DialogContent>
+                        </Dialog>
+
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <DropdownMenuItem
+                              onSelect={e => e.preventDefault()}
+                              className="text-red-600"
+                            >
+                              <Trash2 className="mr-2 size-4" /> Eliminar
+                            </DropdownMenuItem>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>
+                                ¿Estás absolutamente seguro?
+                              </AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Esta acción no se puede deshacer. Esto eliminará
+                                permanentemente la conexión de importación y
+                                todas las importaciones guardadas que la
+                                utilicen.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() =>
+                                  handleDeleteConnection(connection.id)
+                                }
+                                className="bg-red-600 hover:bg-red-700 focus:ring-red-500"
+                              >
+                                Eliminar
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
@@ -523,24 +536,26 @@ const ImportConnectionManager: React.FC<ImportConnectionManagerProps> = ({
         </Table>
       )}
 
-      {/* Dialog para crear conexión */}
-      <Dialog>
-        <DialogTrigger asChild>
-          <Button className="mt-4" size="sm">
-            <PlusCircle className="mr-2 size-4" /> Nueva Conexión
-          </Button>
-        </DialogTrigger>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]">
-          <DialogHeader>
-            <DialogTitle>Crear Nueva Conexión de Importación</DialogTitle>
-            <DialogDescription>
-              Configura una nueva conexión a tu fuente de datos (ej. base de
-              datos, archivo).
-            </DialogDescription>
-          </DialogHeader>
-          <ImportConnectionForm onSuccess={() => router.refresh()} />
-        </DialogContent>
-      </Dialog>
+      {/* Dialog para crear conexión (visible solo con permisos) */}
+      {canManageConnections && (
+        <Dialog>
+          <DialogTrigger asChild>
+            <Button className="mt-4" size="sm">
+              <PlusCircle className="mr-2 size-4" /> Nueva Conexión
+            </Button>
+          </DialogTrigger>
+          <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]">
+            <DialogHeader>
+              <DialogTitle>Crear Nueva Conexión de Importación</DialogTitle>
+              <DialogDescription>
+                Configura una nueva conexión a tu fuente de datos (ej. base de
+                datos, archivo).
+              </DialogDescription>
+            </DialogHeader>
+            <ImportConnectionForm onSuccess={() => router.refresh()} />
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   )
 }
