@@ -15,7 +15,11 @@
     "analyze": "ANALYZE=true npm run build",
     "db:generate": "npx drizzle-kit generate",
     "db:migrate": "npx drizzle-kit migrate",
-    "prepare": "husky install"
+    "prepare": "husky install",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "@clerk/backend": "^1.24.0",
@@ -87,6 +91,8 @@
     "@types/nodemailer": "^7.0.0",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
+    "@vitest/coverage-v8": "^2.0.5",
+    "@vitest/ui": "^2.0.5",
     "dotenv": "^16.4.7",
     "drizzle-kit": "^0.30.4",
     "eslint": "^9",
@@ -96,6 +102,8 @@
     "husky": "^9.1.7",
     "prettier": "^3.5.0",
     "typescript": "^5.9.2",
-    "typescript-eslint": "^8.44.0"
+    "typescript-eslint": "^8.44.0",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^2.0.5"
   }
 }
